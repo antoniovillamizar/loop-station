@@ -2,22 +2,36 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Loop Station</title>
 
-  <!-- Tarjeta para compartir (logo + texto) -->
+  <!-- Vista previa para WhatsApp/Meta -->
   <meta property="og:type" content="website">
   <meta property="og:title" content="Loop Station">
-  <meta property="og:description" content="Escucha Loop Station en vivo. Ábrela y guárdala como app.">
+  <meta property="og:description" content="Escúchala en vivo. Toca para abrir.">
   <meta property="og:image" content="https://antoniovillamizar.github.io/loop-station/logo.png">
   <meta property="og:image:width" content="512">
   <meta property="og:image:height" content="512">
-
   <meta property="og:url" content="https://antoniovillamizar.github.io/loop-station/">
 
-  <!-- Redirección a tu radio -->
-  <meta http-equiv="refresh" content="0; url=https://radio.prorfws.com/public/loop-station">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;padding:24px}
+    .card{max-width:520px;width:100%;border:1px solid #ddd;border-radius:16px;padding:22px;text-align:center}
+    img{width:120px;height:120px;border-radius:24px;object-fit:cover}
+    a.btn{display:inline-block;margin-top:16px;padding:14px 18px;border-radius:12px;text-decoration:none;background:#111;color:#fff;font-weight:700}
+    p{color:#444;line-height:1.4}
+  </style>
 </head>
 <body>
-  Abriendo Loop Station…
+  <div class="card">
+    <img src="logo.png" alt="Loop Station">
+    <h1>Loop Station</h1>
+    <p>Abre la radio aquí 👇</p>
+    <a class="btn" href="https://radio.prorfws.com/public/loop-station">🎧 Escuchar ahora</a>
+    <p style="margin-top:14px;font-size:14px;">
+      iPhone: Compartir → Agregar a pantalla de inicio<br>
+      Android: Instalar / Agregar a pantalla principal
+    </p>
+  </div>
 </body>
 </html>
