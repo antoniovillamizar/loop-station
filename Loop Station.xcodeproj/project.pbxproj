@@ -24,6 +24,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0142133B2F088D7C00342867 /* Loop Station.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Loop Station.xctestplan"; sourceTree = "<group>"; };
+		016FC1442EEB61C80079E48E /* Loop-Station-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Loop-Station-Info.plist"; sourceTree = "<group>"; };
 		01BB4C4B2EEB337600F36EE4 /* Loop Station.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Loop Station.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		01BB4C5A2EEB337800F36EE4 /* Loop StationTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Loop StationTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		01BB4C642EEB337800F36EE4 /* Loop StationUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Loop StationUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -75,6 +77,8 @@
 		01BB4C422EEB337600F36EE4 = {
 			isa = PBXGroup;
 			children = (
+				0142133B2F088D7C00342867 /* Loop Station.xctestplan */,
+				016FC1442EEB61C80079E48E /* Loop-Station-Info.plist */,
 				01BB4C4D2EEB337600F36EE4 /* Loop Station */,
 				01BB4C5D2EEB337800F36EE4 /* Loop StationTests */,
 				01BB4C672EEB337800F36EE4 /* Loop StationUITests */,
@@ -395,8 +399,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = W96YKUBU5B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Loop-Station-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -407,7 +413,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Station-G.Loop-Station";
+				PRODUCT_BUNDLE_IDENTIFIER = com.antoniovillamizar.loopstation;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -426,8 +432,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = W96YKUBU5B;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Loop-Station-Info.plist";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -438,7 +446,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "Station-G.Loop-Station";
+				PRODUCT_BUNDLE_IDENTIFIER = com.antoniovillamizar.loopstation;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
