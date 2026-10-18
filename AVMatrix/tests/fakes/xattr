@@ -1,0 +1,4 @@
+#!/bin/bash
+# xattr simulado: ningún archivo tiene cuarentena.
+[ "$1" = "-p" ] && exit 1
+exit 0

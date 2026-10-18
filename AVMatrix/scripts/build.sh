@@ -32,7 +32,7 @@ mkdir -p "$DRV/Contents/MacOS"
 cp Driver/Info.plist "$DRV/Contents/Info.plist"
 clang $ARCHS $CFLAGS -fvisibility=hidden -bundle \
     -o "$DRV/Contents/MacOS/AVMatrix" \
-    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c \
+    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c Driver/src/avm_rate.c \
     -framework CoreFoundation -framework CoreAudio
 codesign --force --sign "${AVM_SIGN_IDENTITY:--}" --timestamp=none "$DRV"
 
@@ -55,11 +55,18 @@ codesign --force --sign "${AVM_SIGN_IDENTITY:--}" --timestamp=none "$APP"
 echo "== Pruebas del núcleo =="
 clang $CFLAGS -o "$OUT/test_core" tests/test_core.c Driver/src/avm_core.c
 "$OUT/test_core"
+clang $CFLAGS -o "$OUT/test_rate"
+bash tests/test_install.sh tests/test_rate.c Driver/src/avm_rate.c
+"$OUT/test_rate"
+bash tests/test_install.sh
 
 echo "== Verificación =="
 lipo -info "$DRV/Contents/MacOS/AVMatrix"
-codesign --verify --verbose=2 "$DRV"
-plutil -lint "$DRV/Contents/Info.plist"
+codesign --verify --strict --deep --verbose=2 "$DRV"
+codesign --verify --strict --deep --verbose=2 "$APP"
+codesign --verify --strict --verbose=2 "$OUT/avmctl"
+plutil -lint "$DRV/Contents/Info.plist" "$APP/Contents/Info.plist"
+codesign -dvv "$DRV" 2>&1 | grep -E "^(Signature|Authority|TeamIdentifier)=" || true
 echo
 echo "Listo: $OUT"
 echo "Instalar: sudo scripts/install.sh"

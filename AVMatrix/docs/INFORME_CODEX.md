@@ -1,6 +1,79 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 18 de octubre de 2026. Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente del repositorio, así que no hubo nada que respaldar. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 18 de octubre de 2026. Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+
+## 0. Revisión 1 — correcciones pedidas por Codex sobre `04e6cec`
+
+Codex aceptó la arquitectura Smaart / LISTENTO / Música. Se conservan todos los requisitos. **No se instaló nada ni se reinició coreaudiod** (esta sesión es Linux).
+
+### 0.1 Cambio de frecuencia seguro (`AVMatrixDriver.c:449-501` en `04e6cec`)
+
+Decisión: **se rechaza el cambio mientras haya IO activa** en cualquiera de los tres dispositivos. Además se coordina la transición de los tres como una transacción.
+
+- Nuevo módulo portable `Driver/src/avm_rate.[ch]`, sin bloqueos. El driver lo protege con `gClockMutex`.
+- **Inicio** (`avm_rate.c:59`, `AVMatrixDriver.c:556`):
+  - se rechaza con `kAudioHardwareNotReadyError` ('nrdy') si hay IO en cualquier dispositivo o ya hay otra transacción;
+  - si no, abre una transacción con número de generación (24 bits, codificado en la acción) y la pide a los tres dispositivos.
+- **StartIO bloqueado** durante la transacción en los tres dispositivos (`avm_rate.c:131`, `AVMatrixDriver.c:1215`). Así ningún dispositivo arranca a una frecuencia que el host aún no conoce.
+- **Perform** (`avm_rate.c:77`, `AVMatrixDriver.c:478`):
+  - solo aplica si la generación y la frecuencia coinciden con la transacción vigente;
+  - devuelve 'nrdy' y lo trata como cancelación si detecta IO;
+  - el reloj ya no se recalcula en caliente: el ancla se crea en el próximo StartIO.
+  - La frecuencia se guarda solo cuando los tres dispositivos la aplicaron.
+- **Abort, o fallo de `RequestDeviceConfigurationChange`** (`avm_rate.c:96`, `AVMatrixDriver.c:537`, `:556`):
+  - si nadie aplicó el cambio, se cierra la transacción;
+  - si alguien ya lo aplicó, se abre una **reversión** a la frecuencia anterior en los tres (`AVM_IssueRateRevert`, `AVMatrixDriver.c:461`);
+  - si la reversión también se cancela, se marca `inconsistent`, se registra con `os_log_error` y se libera el driver. El siguiente cambio completo lo deja coherente.
+  - Las peticiones y cancelaciones de generaciones viejas se ignoran.
+- **Caducidad:** una transacción sin Perform ni Abort caduca a los 5 s, para que StartIO no quede bloqueado si el host la abandona.
+- **Cambio de formato:** también se comprueba el error de la petición al host, y se valida que el stream pertenezca al dispositivo en Perform.
+- **Interfaz:** la app y `avmctl rate` explican el rechazo («detenga el audio en Smaart, LISTENTO y la música»).
+
+### 0.2 Snapshots de matriz con lectura acotada (`avm_core.c:213-232` en `04e6cec`)
+
+- Tres ranuras, cada una con su contador seqlock y los datos como `_Atomic uint64_t` (36 palabras). Hay **cero accesos no atómicos compartidos**, conforme al modelo de memoria de C11.
+- **Escritor** (`avm_core.c:200`, `:260`): escribe siempre una ranura **distinta de la publicada** y luego publica el índice con `release`. Un escritor suspendido a mitad no afecta a los lectores.
+- **Lector** (`avm_core.c:213`, `:270`): como máximo `AVM_MATRIX_READ_ATTEMPTS` = 4 intentos, sin bucles abiertos ni mutex. Si no obtiene copia coherente, devuelve `false`.
+- **Hilo de audio** (`avm_engine_read`): usa la última matriz coherente de ese grupo (`reader_cache`, un lector por grupo) y cuenta `stale_matrix_reads`.
+- **Propiedad `'mtrx'` (no tiempo real):** se lee con `gStateMutex`, el mismo que serializa a los escritores, así que la lectura siempre es coherente (`AVMatrixDriver.c:600`).
+- **Modelo de memoria también en el audio:** las muestras del buffer pasan a `_Atomic float` con orden relajado. En arm64 y x86_64 compilan a cargas y almacenamientos normales.
+- **Hallazgo durante la revisión:** la prueba de concurrencia existente falló en un build sin sanitizers (1 275 muestras erróneas). La causa: un lector desalojado mientras el escritor, sin ritmo de tiempo real, daba una vuelta completa al buffer (65 536 frames). Se añadió `writing_end`, publicado **antes** de escribir (`avm_core.c:306`), y una validación posterior en el lector con barrera `acquire` (`avm_core.c:394`). Si el escritor pudo sobrescribir lo leído, el bloque se entrega como silencio y se cuenta en `overrun_reads`. En tiempo real esto exigiría un lector retrasado más de 0,68 s a 96 kHz; ahora es imposible entregar audio de otra vuelta.
+
+### 0.3 Firmas en `install.sh` (`scripts/install.sh:49-60` en `04e6cec`)
+
+- Ya no se re-firma por defecto.
+- Sin `AVM_SIGN_IDENTITY` ni `--sign-identity`, se **exige** una firma válida.
+- Con `-`, solo se firma ad hoc lo que no tiene firma válida. **Una firma con identidad (Developer ID) se conserva**, y se comprueba en staging que no cambió.
+- Con una identidad concreta, se firma con ella lo que no esté ya firmado por ella, y se comprueba que el resultado no es ad hoc.
+- La firma se hace **sobre la copia de staging**, nunca sobre el origen.
+- Cualquier error de `codesign` detiene la instalación. Se verifica con `codesign --verify --strict [--deep]` el origen, el staging y el destino final.
+- `build.sh` verifica las firmas de los tres componentes y muestra la autoridad.
+
+### 0.4 Instalación transaccional (`scripts/install.sh:13-60` en `04e6cec`)
+
+1. **Validación de los tres componentes** antes de tocar nada (`install.sh:174`): Info.plist (`plutil -lint`), identificador de bundle, tipo `443ABAB8-…` y fábrica `AVMatrix_Create` en el driver, ejecutable presente y ejecutable, arquitectura del Mac (`lipo -archs`) y firma.
+2. **Staging** junto a cada destino, en el mismo volumen (`install.sh:214`). Se quita la cuarentena solo si existe, y se aplican propietario, permisos y firma.
+3. **Respaldo** verificado con `diff -rq` (`install.sh:256`).
+4. **Sustitución** por `mv`, guardando lo anterior como `.old` (`install.sh:269`).
+5. **Verificación final** (`install.sh:286`): firmas y plist en el destino. Luego reinicia coreaudiod y espera `avmctl status` (20 s por defecto). Si no queda operativa, **restaura** y termina con error.
+
+- Una trampa `EXIT` restaura ante **cualquier** fallo a partir del paso 4. Si ya había reiniciado coreaudiod, lo reinicia de nuevo con la versión anterior. Siempre limpia el staging.
+- Opciones: `--dry-run` (valida y prepara sin tocar nada), `--no-restart` (instala y verifica archivos; deja la comprobación de funcionamiento como PENDIENTE) y `--sign-identity=`.
+- Las rutas y herramientas son configurables por variables `AVM_*`, `CODESIGN`, etc., solo para poder probarlo fuera de `/Library`.
+
+### 0.5 Pruebas nuevas de esta revisión
+
+| Archivo | Qué cubre | Resultado |
+| --- | --- | --- |
+| `tests/test_rate.c` | 48 comprobaciones: rechazo con IO, transacción completa, StartIO bloqueado durante el cambio, Perform con IO, Abort antes y después de aplicar, reversión, reversión cancelada (inconsistente), generaciones viejas, caducidad, vuelta del contador | **48/48** |
+| `tests/test_core.c` (nuevas) | Escritor suspendido en ranura libre (100 000 lecturas sin efecto); ranura publicada inestable: lectura `false` acotada, destino intacto, audio con la última matriz y contador; concurrencia escritor/2 lectores sin copias mezcladas; vuelta del escritor detectada como silencio | **115/115** en total |
+| `tests/test_install.sh` | 57 comprobaciones con `codesign`/`plutil`/`lipo`/`xattr` simulados: instalación nueva, actualización, firma inválida (nada cambia), Developer ID conservada con `-`, ad hoc solo en staging, identidad elegida, error de firma, comprobación de funcionamiento fallida (restaura exacto y reinicia de nuevo), fallo a mitad de sustitución (con y sin versión previa), plist, arquitectura, ejecutable o fábrica inválidos, prueba en seco, `--sign-identity` | **57/57** |
+| Mutaciones | Se desactivó la restauración (7 pruebas fallan) y se forzó la firma ad hoc sobre Developer ID (2 pruebas fallan) | Las pruebas detectan ambas |
+| Concurrencia bajo carga | 24 ejecuciones paralelas en 4 núcleos: 16-22 vueltas del escritor detectadas por ejecución, 0 muestras erróneas | Correcto |
+| Sanitizers | ASan + UBSan (núcleo y frecuencia) y TSan (núcleo) | Sin avisos |
+| Compilación cruzada | Driver, `avmctl` y app contra el SDK 15.5, arm64 + x86_64, `-Wall -Wextra -Wpedantic -Werror` | Sin avisos; el driver solo exporta `_AVMatrix_Create` |
+
+**Límite de estas pruebas:** el instalador se probó con **bash 5 en Linux**. macOS usa bash 3.2 en `/bin/bash`; el script evita arrays vacíos con `set -u` y otras construcciones de bash 4, pero no se pudo ejecutar con bash 3.2 aquí (no hay acceso a sus fuentes). `build.sh` ejecuta `tests/test_install.sh` en el Mac con el bash del sistema.
 
 ## 1. Resumen
 
@@ -10,7 +83,7 @@ AudioServerPlugIn de CoreAudio, escrito en C, que publica tres dispositivos virt
 - una herramienta de Terminal con autoprueba (`avmctl`);
 - scripts de compilación, instalación y desinstalación.
 
-**Estado honesto:** el código compila y enlaza para macOS (arm64 y x86_64) y las pruebas del núcleo pasan. **No se ha ejecutado en ningún Mac.** No hay ninguna prueba hecha con Smaart, LISTENTO, Apple Music ni coreaudiod.
+**Estado honesto:** el código compila y enlaza para macOS (arm64 y x86_64) y pasan las pruebas del núcleo, de la transacción de frecuencia y del instalador. **No se ha ejecutado en ningún Mac.** No hay ninguna prueba hecha con Smaart, LISTENTO, Apple Music ni coreaudiod.
 
 ## 2. Verificación del sistema y elección de la implementación
 
@@ -28,7 +101,7 @@ AudioServerPlugIn de CoreAudio, escrito en C, que publica tres dispositivos virt
 
 ## 3. Arquitectura
 
-### 3.1 Dispositivos (`Driver/src/AVMatrixDriver.c:74`)
+### 3.1 Dispositivos (`Driver/src/AVMatrixDriver.c:75`)
 
 | Dispositivo | UID | Entradas | Salidas | Por defecto del sistema |
 | --- | --- | --- | --- | --- |
@@ -36,7 +109,7 @@ AudioServerPlugIn de CoreAudio, escrito en C, que publica tres dispositivos virt
 | AV Matrix LISTENTO | `AVMatrix_Listento_UID` | 8 «Envío N» | 8 «Retorno N» | No |
 | AV Matrix Música | `AVMatrix_Music_UID` | — | 2 «Música L/R» | Sí, como salida; no como dispositivo de alertas |
 
-- Terminal de stream: `kAudioStreamTerminalTypeLine` en las dos direcciones (`AVMatrixDriver.c:936`). Las entradas no se declaran como micrófono.
+- Terminal de stream: `kAudioStreamTerminalTypeLine` en las dos direcciones (`AVMatrixDriver.c:1022`). Las entradas no se declaran como micrófono.
 - Transporte `kAudioDeviceTransportTypeVirtual`. Mismo `ClockDomain` en los tres.
 
 **Desviación consciente sobre el «único dispositivo»:** Smaart ve un único dispositivo (AV Matrix Smaart) y lo usa para enviar y recibir. LISTENTO usa un segundo dispositivo. Si LISTENTO usara el de Smaart, el HAL de macOS sumaría las salidas de ambos clientes (ruido rosa + retorno) en los mismos canales antes de que el driver las reciba. Es justo la mezcla involuntaria que el pedido prohíbe. **Codex: confirmar que esta lectura del requisito es aceptable para Antonio.**
@@ -47,7 +120,7 @@ AudioServerPlugIn de CoreAudio, escrito en C, que publica tres dispositivos virt
 - 16 destinos: Smaart entrada 1-8, LISTENTO envío 1-8.
 - Cruces binarios a ganancia unidad. Varias fuentes en un destino se suman en float.
 - **Regla anti-lazo** (`avm_core.c:61`): prohibido LISTENTO retorno → LISTENTO envío. Se aplica en tres sitios:
-  - el driver rechaza la matriz completa (`AVMatrixDriver.c:520`, `avm_matrix_is_valid`);
+  - el driver rechaza la matriz completa (`AVMatrixDriver.c:610`, `avm_matrix_is_valid`);
   - el motor ignora el cruce aunque llegue a la matriz (`avm_engine_read`);
   - la UI deshabilita la casilla.
 - Permitido a propósito: Smaart salida → Smaart entrada (referencia en bucle local). No es realimentación, porque Smaart no reenvía su entrada a su salida.
@@ -59,13 +132,13 @@ AudioServerPlugIn de CoreAudio, escrito en C, que publica tres dispositivos virt
 
 - Un buffer circular float32 de 65 536 frames por fuente. Ventana válida: los 32 768 frames más recientes escritos de cada grupo de fuentes.
 - `WriteMix` escribe en la posición `mOutputTime.mSampleTime`; `ReadInput` lee en `mInputTime.mSampleTime` y suma según la matriz.
-- **Sin datos viejos** (`avm_core.c:251-341`):
+- **Sin datos viejos** (`avm_core.c:291-408`):
   - lo que está fuera de `[max(written_end - ventana, valid_begin), written_end)` se lee como silencio;
   - si una aplicación deja de enviar y vuelve, el hueco se borra al escribir;
-  - cuando el último cliente de los tres dispositivos se detiene y otro arranca, `StartIO` vacía el motor y crea una nueva línea de tiempo (`AVMatrixDriver.c:1114`).
-- **Reloj común** (`AVMatrixDriver.c:1151`): `GetZeroTimeStamp` usa una sola ancla para los tres dispositivos (periodo 16 384 frames). Por eso la posición en frames coincide entre Smaart, LISTENTO y Música.
-- **Cambio de frecuencia:** se pide `RequestDeviceConfigurationChange` en los tres dispositivos (`AVMatrixDriver.c:493`). Al aplicarlo, se recalcula el ancla para conservar la posición actual (`AVMatrixDriver.c:461`).
-- La matriz usa un seqlock: un solo escritor (con mutex) y lectores en tiempo real sin bloqueo.
+  - cuando el último cliente de los tres dispositivos se detiene y otro arranca, `StartIO` vacía el motor y crea una nueva línea de tiempo (`AVMatrixDriver.c:1206`).
+- **Reloj común** (`AVMatrixDriver.c:1244`): `GetZeroTimeStamp` usa una sola ancla para los tres dispositivos (periodo 16 384 frames). Por eso la posición en frames coincide entre Smaart, LISTENTO y Música.
+- **Cambio de frecuencia:** transacción sobre los tres dispositivos, solo sin IO activa (ver §0.1).
+- **Matriz:** snapshots en tres ranuras atómicas con lectura acotada (ver §0.2).
 - El hilo de IO no reserva memoria ni toma mutex, salvo el mutex corto de `GetZeroTimeStamp`, que es el mismo patrón que el ejemplo NullAudio de Apple.
 
 ### 3.4 Formatos
@@ -78,7 +151,7 @@ AudioServerPlugIn de CoreAudio, escrito en C, que publica tres dispositivos virt
 
 | # | Prueba | Resultado |
 | --- | --- | --- |
-| 1 | `make test`: 102 comprobaciones del núcleo, que cubren reglas anti-lazo, aislamiento con el preset, matriz vacía = silencio, ruta única y suma explícita, cruce prohibido forzado ignorado, datos viejos/huecos/ventana/reset, formatos (ida y vuelta, recorte, −1,0, NaN, SInt16→SInt24 exacto), música estéreo L/R por separado y concurrencia escritor/lector (≈27 000 lecturas sin una muestra corrupta) | **102/102 correctas** |
+| 1 | `make test` (revisión inicial): 102 comprobaciones del núcleo; hoy son 115 + 48 de frecuencia + 57 del instalador (§0.5), que cubren reglas anti-lazo, aislamiento con el preset, matriz vacía = silencio, ruta única y suma explícita, cruce prohibido forzado ignorado, datos viejos/huecos/ventana/reset, formatos (ida y vuelta, recorte, −1,0, NaN, SInt16→SInt24 exacto), música estéreo L/R por separado y concurrencia escritor/lector (≈27 000 lecturas sin una muestra corrupta) | **102/102 correctas** |
 | 2 | Las mismas pruebas con AddressSanitizer + UBSan (gcc) | Sin errores |
 | 3 | Las mismas pruebas con ThreadSanitizer (gcc) | Sin avisos |
 | 4 | Compilación del driver contra el SDK de macOS 15.5, arm64 y x86_64, con `-Wall -Wextra -Wpedantic -Werror` | Sin avisos |
@@ -105,6 +178,9 @@ Orden propuesto, que sigue las etapas pedidas:
 | 2 | Cadena completa con Colombia | Prueba real con el equipo remoto |
 | 3 | «AV Matrix Música» se puede elegir como salida del sistema; Apple Music, Spotify, Tidal y DAW llegan a la matriz | Configuración del Sistema → Sonido; `avmctl test` ya cubre la ruta de música |
 | 4 | 44,1, 48 y 96 kHz × Float32, SInt32, SInt24, SInt16 | `avmctl test-all` |
+| 4 | Cambio de frecuencia rechazado con audio activo (desde Smaart, la app y `avmctl`) y admitido sin él; comprobar en el registro que no hay transacciones abandonadas ni `inconsistent` | Manual + `log show … \| grep -i avmatrix` |
+| 0 | Pruebas del instalador con el bash 3.2 de macOS | `bash tests/test_install.sh` (lo hace `build.sh`) |
+| 1 | Instalación real: `--dry-run`, luego instalación con reinicio; restauración si falla | `sudo scripts/install.sh --dry-run`, `sudo scripts/install.sh` |
 | 4 | Recuperación: cerrar y abrir Smaart y LISTENTO en cualquier orden, sin audio viejo ni canales cruzados | Manual + `avmctl test` después |
 | 4 | Persistencia de matriz y frecuencia tras reiniciar coreaudiod y el Mac | `avmctl show` antes y después |
 | 4 | Retardo de transporte con los buffers reales de Smaart y LISTENTO | `avmctl test` (INFO) |
@@ -114,22 +190,24 @@ Orden propuesto, que sigue las etapas pedidas:
 
 ## 6. Riesgos y puntos para revisar
 
-1. **Visibilidad en Smaart y LISTENTO:** Smaart y LISTENTO devuelven `DeviceCanBeDefaultDevice = 0` (`AVMatrixDriver.c:805`) para que el sistema no los use por defecto. Lo normal es que las aplicaciones listen todos los dispositivos de todos modos, pero no está probado. Si alguna no los muestra, el cambio es poner `canBeDefaultOutput = true` en `kDevices`.
+1. **Visibilidad en Smaart y LISTENTO:** Smaart y LISTENTO devuelven `DeviceCanBeDefaultDevice = 0` (`AVMatrixDriver.c:895`) para que el sistema no los use por defecto. Lo normal es que las aplicaciones listen todos los dispositivos de todos modos, pero no está probado. Si alguna no los muestra, el cambio es poner `canBeDefaultOutput = true` en `kDevices`.
 2. **Firma en macOS 27:** ver §2.
 3. **Permiso de micrófono:** la lectura de entradas exige el permiso TCC de micrófono (Smaart, LISTENTO y Terminal para `avmctl test`).
-4. **Cambio de frecuencia en caliente:** al cambiar la frecuencia con audio activo, durante un instante puede salir audio grabado a la frecuencia anterior (un fallo audible breve). Se recomienda cambiarla con las aplicaciones cerradas.
+4. **Cambio de frecuencia:** ahora se rechaza con audio activo (§0.1). Riesgo nuevo, por verificar en el Mac: si Smaart cambia la frecuencia sin detener antes su propio audio, verá el error 'nrdy' y el usuario tendrá que detener el audio y repetir. Si macOS mantiene abierta la salida del sistema (AV Matrix Música como salida por defecto), puede bastar con pausar la música; si no, hay que elegir otra salida del sistema durante el cambio.
 5. **Varios clientes en una misma salida:** el HAL suma lo que envíen dos aplicaciones a un mismo dispositivo. Es una propiedad de macOS. Por eso Smaart y LISTENTO no pueden ser la salida por defecto, y la música tiene su propio dispositivo.
 6. **IO buffer muy grande:** la ventana válida es de 32 768 frames. Con buffers de IO superiores a unos 8 192 frames por lado no se ha razonado ni probado el margen.
 7. **Latencia informada 0:** el driver declara latencia y safety offset 0. El retardo real del bucle virtual se mide con `avmctl test`. Smaart lo compensa con su buscador de delay; no hay delay ajustable.
-8. `dist/` contiene binarios de compilación cruzada (lld, SDK 15.5). Se recomienda la compilación nativa con `build.sh`.
+8. `dist/` contiene binarios de compilación cruzada (lld, SDK 15.5) con solo la firma del enlazador. El instalador los rechaza salvo `--sign-identity=-`. Se recomienda la compilación nativa con `build.sh`.
+9. **Comportamiento real del host ante la transacción:** el orden de Perform/Abort de coreaudiod con tres dispositivos y la llamada síncrona o diferida a Perform están razonados según la documentación de `AudioServerPlugIn.h`, pero no probados.
 
 ## 7. Lista de revisión sugerida para Codex
 
 - [ ] ¿Es aceptable la división Smaart / LISTENTO / Música frente al «único dispositivo»? (§3.1)
 - [ ] Propiedades del HAL: comparar `AVM_*_HasProperty`/`GetPropertyData` con el ejemplo NullAudio de Apple
-- [ ] Semántica de `ReadInput`/`WriteMix` y formato físico (`AVMatrixDriver.c:1197`)
-- [ ] Reloj común y cambio de frecuencia (`AVMatrixDriver.c:440-490`, `1151`)
-- [ ] Ventana válida y borrado de huecos (`avm_core.c:251-341`)
+- [ ] Semántica de `ReadInput`/`WriteMix` y formato físico (`AVMatrixDriver.c:1290`)
+- [ ] Transacción de frecuencia (`avm_rate.c`, `AVMatrixDriver.c:461-595`, `:1215`)
+- [ ] Snapshots de matriz y validación de vuelta del escritor (`avm_core.c:200-280`, `:306`, `:394`)
+- [ ] Instalador transaccional y firmas (`scripts/install.sh`, `tests/test_install.sh`)
 - [ ] Regla anti-lazo: ¿hace falta prohibir algo más? (`avm_core.c:61`)
 - [ ] Scripts: copia de seguridad antes de reemplazar, reinicio de coreaudiod
 - [ ] Ejecutar en el Mac la tabla del §5 y anotar los resultados aquí

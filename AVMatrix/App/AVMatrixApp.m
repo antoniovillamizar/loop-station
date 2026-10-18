@@ -321,8 +321,13 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     NSInteger i = sender.indexOfSelectedItem;
     if (i < 0 || i >= 3) return;
     OSStatus err = avm_set_sample_rate(kRates[i]);
-    if (err != noErr)
+    if (err == kAudioHardwareNotReadyError) {
+        [self showError:@"No se puede cambiar la frecuencia con audio activo. Detenga el audio en Smaart, LISTENTO y la música, y vuelva a intentarlo."];
+        [self reload];
+    } else if (err != noErr) {
         [self showError:[NSString stringWithFormat:@"No se pudo cambiar la frecuencia (error %d).", (int)err]];
+        [self reload];
+    }
     // La recarga llega por la notificación de cambio de frecuencia.
 }
 

@@ -16,6 +16,9 @@ test:
 	mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $(BUILD)/test_core tests/test_core.c Driver/src/avm_core.c -lm -lpthread
 	./$(BUILD)/test_core
+	$(CC) $(CFLAGS) -o $(BUILD)/test_rate tests/test_rate.c Driver/src/avm_rate.c
+	./$(BUILD)/test_rate
+	bash tests/test_install.sh
 
 test-sanitize:
 	mkdir -p $(BUILD)
@@ -23,13 +26,15 @@ test-sanitize:
 	./$(BUILD)/test_core_asan
 	gcc -std=c11 -O1 -g -fsanitize=thread -o $(BUILD)/test_core_tsan tests/test_core.c Driver/src/avm_core.c -lm -lpthread
 	./$(BUILD)/test_core_tsan
+	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_rate_asan tests/test_rate.c Driver/src/avm_rate.c
+	./$(BUILD)/test_rate_asan
 
 cross:
 	@test -n "$(SDK)" || (echo "Indique SDK=/ruta/MacOSX.sdk" && false)
 	mkdir -p $(BUILD)/cross
 	for a in arm64 x86_64; do \
 	  clang -target $$a-apple-macos$(MINOS) $(XFLAGS) -fvisibility=hidden -bundle -o $(BUILD)/cross/AVMatrix_$$a \
-	    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c -framework CoreFoundation -framework CoreAudio || exit 1; \
+	    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c Driver/src/avm_rate.c -framework CoreFoundation -framework CoreAudio || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) $(XFLAGS) -o $(BUILD)/cross/avmctl_$$a \
 	    Client/avmctl.c Client/avm_client.c Driver/src/avm_core.c -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \

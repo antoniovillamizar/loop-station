@@ -1,0 +1,6 @@
+#!/bin/bash
+# lipo simulado: -archs lee la línea "#ARCHS=..." del ejecutable.
+[ "$1" = "-archs" ] || exit 2
+a=$(grep -m1 "^#ARCHS=" "$2" | sed 's/^#ARCHS=//')
+[ -n "$a" ] || exit 1
+echo "$a"

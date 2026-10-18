@@ -73,12 +73,39 @@ typedef enum {
     AVM_ROUTE_OUT_OF_RANGE = 2
 } avm_route_status;
 
+// Publicación de la matriz sin bloqueos para el hilo de audio:
+// el escritor (serializado por el llamador) escribe una ranura que no es la
+// publicada y luego publica su índice. Cada ranura lleva su propio contador
+// (seqlock con datos atómicos, conforme al modelo de memoria de C11).
+// El lector hace como máximo AVM_MATRIX_READ_ATTEMPTS intentos y nunca espera
+// al escritor; si no logra una copia coherente, usa la última copia válida.
+#define AVM_MATRIX_SLOTS          3
+#define AVM_MATRIX_WORDS          ((sizeof(avm_matrix) + 7) / 8)
+#define AVM_MATRIX_READ_ATTEMPTS  4
+
 typedef struct {
-    float               ring[AVM_NUM_SOURCES][AVM_RING_FRAMES];
+    _Atomic uint32_t    seq;                         // impar = escritura en curso
+    _Atomic uint64_t    words[AVM_MATRIX_WORDS];
+} avm_matrix_slot;
+
+typedef struct {
+    // Las muestras son atómicas con orden relajado: en arm64 y x86_64 compilan
+    // a cargas y almacenamientos normales, y evitan carreras de datos (UB en C11).
+    _Atomic float       ring[AVM_NUM_SOURCES][AVM_RING_FRAMES];
     _Atomic int64_t     written_end[AVM_SRC_GROUP_COUNT];  // primer frame aún no escrito
     _Atomic int64_t     valid_begin[AVM_SRC_GROUP_COUNT];  // datos anteriores no son válidos
-    _Atomic uint32_t    matrix_seq;                         // seqlock: impar = escribiendo
-    avm_matrix          matrix;
+    // Hasta dónde llega la escritura en curso (se publica ANTES de escribir).
+    // El lector lo consulta después de leer: si el escritor dio una vuelta
+    // completa al buffer sobre lo leído, descarta el bloque (silencio).
+    _Atomic int64_t     writing_end[AVM_SRC_GROUP_COUNT];
+    _Atomic uint64_t    overrun_reads;                      // diagnóstico: bloques descartados
+
+    avm_matrix_slot     matrix_slots[AVM_MATRIX_SLOTS];
+    _Atomic uint32_t    matrix_published;                  // índice de la ranura vigente
+    // Última matriz coherente vista por cada grupo de destinos. Solo la usa el
+    // hilo de IO del dispositivo correspondiente (un lector por grupo).
+    avm_matrix          reader_cache[AVM_DST_GROUP_COUNT];
+    _Atomic uint64_t    stale_matrix_reads;                // diagnóstico: lecturas con copia anterior
 } avm_engine;
 
 // --- Descripción de grupos -------------------------------------------------
@@ -100,8 +127,12 @@ bool avm_matrix_is_valid(const avm_matrix* m);
 void avm_engine_init(avm_engine* e);
 // Vacía los buffers y la historia de escritura. No usar mientras haya IO activo.
 void avm_engine_reset(avm_engine* e);
+// Publica una matriz. Los escritores deben estar serializados por el llamador.
+// Nunca bloquea a los lectores.
 void avm_engine_set_matrix(avm_engine* e, const avm_matrix* m);
-void avm_engine_get_matrix(const avm_engine* e, avm_matrix* out);
+// Lectura acotada y sin espera. Devuelve false (y no modifica *out) si tras
+// AVM_MATRIX_READ_ATTEMPTS intentos no obtuvo una copia coherente.
+bool avm_engine_try_get_matrix(avm_engine* e, avm_matrix* out);
 
 // Escribe audio intercalado de una aplicación en las fuentes de un grupo.
 // sample_time es la posición en la línea de tiempo común del driver.
@@ -111,7 +142,9 @@ void avm_engine_write(avm_engine* e, avm_src_group g, int64_t sample_time,
 
 // Produce el audio intercalado de un grupo de destinos según la matriz.
 // Las fuentes sin datos válidos para ese instante aportan silencio.
-void avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
+// Devuelve false si el bloque se descartó (silencio) porque el escritor
+// sobrescribió los datos durante la lectura (lector retrasado > una vuelta del buffer).
+bool avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
                      uint32_t frames, void* interleaved, avm_format fmt,
                      uint32_t channels);
 

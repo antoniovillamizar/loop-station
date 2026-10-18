@@ -1,0 +1,6 @@
+#!/bin/bash
+# plutil simulado: -lint falla si el archivo contiene BROKEN.
+[ "$1" = "-lint" ] || exit 2
+shift
+for f in "$@"; do grep -q BROKEN "$f" && exit 1; done
+exit 0

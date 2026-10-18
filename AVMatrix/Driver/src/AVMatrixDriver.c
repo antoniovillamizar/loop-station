@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "avm_core.h"
+#include "avm_rate.h"
 
 // ---------------------------------------------------------------------------
 #pragma mark Constantes
@@ -86,12 +87,16 @@ static const AVM_DeviceDesc kDevices[kAVM_NumDevices] = {
       NULL, "Música %u" },
 };
 
-// Acciones de cambio de configuración.
+// Acciones de cambio de configuración: [tipo 8 bits][generación 24 bits][valor 32 bits].
 #define kAVM_ActionSetRate    1ull
 #define kAVM_ActionSetFormat  2ull
-#define AVM_ACTION(kind, value) (((UInt64)(kind) << 56) | ((UInt64)(value) & 0x00FFFFFFFFFFFFFFull))
+#define AVM_ACTION(kind, gen, value) (((UInt64)(kind) << 56) | (((UInt64)(gen) & 0xFFFFFFull) << 32) | ((UInt64)(value) & 0xFFFFFFFFull))
 #define AVM_ACTION_KIND(a)      ((a) >> 56)
-#define AVM_ACTION_VALUE(a)     ((a) & 0x00FFFFFFFFFFFFFFull)
+#define AVM_ACTION_GEN(a)       ((UInt32)(((a) >> 32) & 0xFFFFFFull))
+#define AVM_ACTION_VALUE(a)     ((UInt32)((a) & 0xFFFFFFFFull))
+
+// Una transacción de frecuencia sin Perform ni Abort caduca a los 5 s.
+#define kAVM_RateTransactionTimeoutNs 5000000000ull
 
 // ---------------------------------------------------------------------------
 #pragma mark Estado
@@ -101,11 +106,11 @@ static pthread_mutex_t          gClockMutex = PTHREAD_MUTEX_INITIALIZER;
 static UInt32                   gRefCount = 0;
 static AudioServerPlugInHostRef gHost = NULL;
 
-static Float64                  gSampleRate = 48000.0;
+// Frecuencia, transacción de cambio de frecuencia y contadores de IO.
+// Protegido por gClockMutex.
+static avm_rate_state           gRate;
 static Float64                  gHostTicksPerFrame = 0.0;
-static Float64                  gAnchorHostTime = 0.0;   // con signo: puede ser negativo tras un cambio de frecuencia
-static UInt32                   gRunningTotal = 0;
-static UInt32                   gDeviceRunning[kAVM_NumDevices];
+static Float64                  gAnchorHostTime = 0.0;
 
 static _Atomic int              gStreamFormat[kObj_Max];   // avm_format por stream
 static _Atomic bool             gStreamActive[kObj_Max];
@@ -200,9 +205,22 @@ static UInt32 AVM_StreamChannels(int dev, bool isInput)
 
 static bool AVM_IsSupportedRate(Float64 r)
 {
-    for (int i = 0; i < kAVM_NumSampleRates; i++)
-        if (kAVM_SampleRates[i] == r) return true;
-    return false;
+    return avm_rate_is_supported(r);
+}
+
+static UInt64 AVM_NowNs(void)
+{
+    static mach_timebase_info_data_t tb;
+    if (tb.denom == 0) mach_timebase_info(&tb);
+    return (UInt64)((__uint128_t)mach_absolute_time() * tb.numer / tb.denom);
+}
+
+static Float64 AVM_CurrentRate(void)
+{
+    pthread_mutex_lock(&gClockMutex);
+    Float64 r = gRate.current_rate;
+    pthread_mutex_unlock(&gClockMutex);
+    return r;
 }
 
 static void AVM_FillASBD(AudioStreamBasicDescription* d, avm_format fmt, Float64 rate, UInt32 channels)
@@ -242,7 +260,7 @@ static void AVM_UpdateTicksPerFrame_Locked(void)
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
     Float64 hostClockFrequency = ((Float64)tb.denom / (Float64)tb.numer) * 1000000000.0;
-    gHostTicksPerFrame = hostClockFrequency / gSampleRate;
+    gHostTicksPerFrame = hostClockFrequency / gRate.current_rate;
 }
 
 static void AVM_NotifyAllDevices(AudioObjectPropertySelector sel)
@@ -296,7 +314,7 @@ static void AVM_LoadState(void)
 {
     Float64 rate = 0;
     if (AVM_LoadNumber("sample_rate", kCFNumberFloat64Type, &rate) && AVM_IsSupportedRate(rate))
-        gSampleRate = rate;
+        gRate.current_rate = rate;
 
     for (int i = 0; i < kAVM_NumDevices; i++) {
         AudioObjectID streams[2] = { kDevices[i].inStream, kDevices[i].outStream };
@@ -395,6 +413,8 @@ static OSStatus AVM_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerP
         atomic_init(&gStreamActive[i], true);
     }
 
+    avm_rate_init(&gRate, kAVM_NumDevices, 48000.0, kAVM_RateTransactionTimeoutNs);
+
     gEngine = (avm_engine*)calloc(1, sizeof(avm_engine));
     if (gEngine == NULL) return kAudioHardwareUnspecifiedError;
     avm_engine_init(gEngine);
@@ -405,7 +425,7 @@ static OSStatus AVM_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerP
     AVM_UpdateTicksPerFrame_Locked();
     pthread_mutex_unlock(&gClockMutex);
 
-    os_log(gLog, "AVMatrix: inicializado a %.0f Hz", gSampleRate);
+    os_log(gLog, "AVMatrix: inicializado a %.0f Hz", gRate.current_rate);
     return 0;
 }
 
@@ -437,39 +457,72 @@ static OSStatus AVM_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, Audi
     return 0;
 }
 
+// Pide a los tres dispositivos la reversión abierta por avm_rate_abort.
+static void AVM_IssueRateRevert(avm_rate_abort_result r)
+{
+    if (!r.revert_needed || gHost == NULL) return;
+    os_log_error(gLog, "AVMatrix: cambio de frecuencia cancelado a medias; revirtiendo a %.0f Hz", r.revert_rate);
+    for (int i = 0; i < kAVM_NumDevices; i++) {
+        OSStatus err = gHost->RequestDeviceConfigurationChange(gHost, kDevices[i].device,
+            AVM_ACTION(kAVM_ActionSetRate, r.revert_generation, (UInt32)r.revert_rate), NULL);
+        if (err != 0) {
+            pthread_mutex_lock(&gClockMutex);
+            avm_rate_abort(&gRate, (uint32_t)i, r.revert_generation, AVM_NowNs());  // marca inconsistente
+            pthread_mutex_unlock(&gClockMutex);
+            os_log_error(gLog, "AVMatrix: la reversión de frecuencia falló (%d); estado inconsistente", (int)err);
+            return;
+        }
+    }
+}
+
 static OSStatus AVM_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void* inChangeInfo)
 {
     (void)inChangeInfo;
     if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
-    if (AVM_DeviceIndex(inDeviceObjectID) < 0) return kAudioHardwareBadObjectError;
+    int dev = AVM_DeviceIndex(inDeviceObjectID);
+    if (dev < 0) return kAudioHardwareBadObjectError;
 
     UInt64 kind = AVM_ACTION_KIND(inChangeAction);
-    UInt64 value = AVM_ACTION_VALUE(inChangeAction);
+    UInt32 gen = AVM_ACTION_GEN(inChangeAction);
+    UInt32 value = AVM_ACTION_VALUE(inChangeAction);
 
     if (kind == kAVM_ActionSetRate) {
         Float64 newRate = (Float64)value;
-        if (!AVM_IsSupportedRate(newRate)) return kAudioHardwareIllegalOperationError;
         pthread_mutex_lock(&gClockMutex);
-        if (newRate != gSampleRate) {
-            // La línea de tiempo común continúa sin saltos: se recalcula el ancla
-            // para que la posición actual en frames se conserve con la nueva frecuencia.
-            Float64 now = (Float64)mach_absolute_time();
-            Float64 position = (gRunningTotal > 0 && gHostTicksPerFrame > 0) ? (now - gAnchorHostTime) / gHostTicksPerFrame : 0.0;
-            gSampleRate = newRate;
+        avm_rate_status st = avm_rate_perform(&gRate, (uint32_t)dev, gen, newRate);
+        avm_rate_abort_result revert = { false, 0.0, 0 };
+        bool completed = false;
+        if (st == AVM_RATE_OK) {
+            // No hay IO en ningún dispositivo (lo garantiza avm_rate_perform);
+            // el ancla del reloj se recalcula en el próximo StartIO.
             AVM_UpdateTicksPerFrame_Locked();
-            if (gRunningTotal > 0)
-                gAnchorHostTime = now - position * gHostTicksPerFrame;
-            os_log(gLog, "AVMatrix: frecuencia cambiada a %.0f Hz", newRate);
+            completed = !avm_rate_pending(&gRate) && !gRate.inconsistent;
+        } else if (st == AVM_RATE_IO_ACTIVE) {
+            // No se aplica con IO activa: se trata como cancelación.
+            revert = avm_rate_abort(&gRate, (uint32_t)dev, gen, AVM_NowNs());
         }
+        Float64 current = gRate.current_rate;
         pthread_mutex_unlock(&gClockMutex);
-        AVM_StoreNumber("sample_rate", kCFNumberFloat64Type, &newRate);
-        return 0;
+
+        if (st == AVM_RATE_OK) {
+            if (completed) {
+                AVM_StoreNumber("sample_rate", kCFNumberFloat64Type, &current);
+                os_log(gLog, "AVMatrix: frecuencia cambiada a %.0f Hz", current);
+            }
+            return 0;
+        }
+        AVM_IssueRateRevert(revert);
+        return st == AVM_RATE_IO_ACTIVE ? kAudioHardwareNotReadyError : kAudioHardwareIllegalOperationError;
     }
 
     if (kind == kAVM_ActionSetFormat) {
         AudioObjectID stream = (AudioObjectID)(value >> 8);
         int fmt = (int)(value & 0xFF);
-        if (stream >= kObj_Max || fmt < 0 || fmt >= AVM_FMT_COUNT) return kAudioHardwareIllegalOperationError;
+        bool isInput = false;
+        if (stream >= kObj_Max || AVM_StreamIndex(stream, &isInput) != dev || fmt < 0 || fmt >= AVM_FMT_COUNT)
+            return kAudioHardwareIllegalOperationError;
+        // El host detiene la IO de este dispositivo antes de llamar aquí; el
+        // formato solo afecta a este stream.
         atomic_store(&gStreamFormat[stream], fmt);
         char key[32];
         snprintf(key, sizeof(key), "format_stream_%u", (unsigned)stream);
@@ -483,22 +536,54 @@ static OSStatus AVM_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef 
 
 static OSStatus AVM_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void* inChangeInfo)
 {
-    (void)inChangeAction; (void)inChangeInfo;
+    (void)inChangeInfo;
     if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
-    if (AVM_DeviceIndex(inDeviceObjectID) < 0) return kAudioHardwareBadObjectError;
+    int dev = AVM_DeviceIndex(inDeviceObjectID);
+    if (dev < 0) return kAudioHardwareBadObjectError;
+
+    if (AVM_ACTION_KIND(inChangeAction) == kAVM_ActionSetRate) {
+        pthread_mutex_lock(&gClockMutex);
+        avm_rate_abort_result r = avm_rate_abort(&gRate, (uint32_t)dev, AVM_ACTION_GEN(inChangeAction), AVM_NowNs());
+        pthread_mutex_unlock(&gClockMutex);
+        AVM_IssueRateRevert(r);
+    }
+    // Un cambio de formato solo se aplica en Perform: cancelarlo no deja nada que deshacer.
     return 0;
 }
 
-// Pide al host el cambio de frecuencia en los tres dispositivos (comparten reloj).
+// Pide el cambio de frecuencia a los tres dispositivos (comparten reloj).
+// Se rechaza si hay IO activa en cualquiera de ellos o si ya hay un cambio en curso.
 static OSStatus AVM_RequestRateChange(Float64 rate)
 {
     if (!AVM_IsSupportedRate(rate)) return kAudioDeviceUnsupportedFormatError;
+    uint32_t gen = 0;
     pthread_mutex_lock(&gClockMutex);
-    Float64 current = gSampleRate;
+    avm_rate_status st = avm_rate_begin(&gRate, rate, AVM_NowNs(), &gen);
     pthread_mutex_unlock(&gClockMutex);
-    if (rate == current) return 0;
-    for (int i = 0; i < kAVM_NumDevices; i++)
-        gHost->RequestDeviceConfigurationChange(gHost, kDevices[i].device, AVM_ACTION(kAVM_ActionSetRate, (UInt64)rate), NULL);
+
+    switch (st) {
+        case AVM_RATE_SAME:        return 0;
+        case AVM_RATE_UNSUPPORTED: return kAudioDeviceUnsupportedFormatError;
+        case AVM_RATE_IO_ACTIVE:
+            os_log(gLog, "AVMatrix: cambio a %.0f Hz rechazado: hay audio activo en un dispositivo AV Matrix", rate);
+            return kAudioHardwareNotReadyError;
+        case AVM_RATE_BUSY:        return kAudioHardwareNotReadyError;
+        case AVM_RATE_STALE:       return kAudioHardwareIllegalOperationError;
+        case AVM_RATE_OK:          break;
+    }
+
+    for (int i = 0; i < kAVM_NumDevices; i++) {
+        OSStatus err = gHost->RequestDeviceConfigurationChange(gHost, kDevices[i].device,
+            AVM_ACTION(kAVM_ActionSetRate, gen, (UInt32)rate), NULL);
+        if (err != 0) {
+            os_log_error(gLog, "AVMatrix: el host rechazó el cambio de frecuencia (%d)", (int)err);
+            pthread_mutex_lock(&gClockMutex);
+            avm_rate_abort_result r = avm_rate_abort(&gRate, (uint32_t)i, gen, AVM_NowNs());
+            pthread_mutex_unlock(&gClockMutex);
+            AVM_IssueRateRevert(r);
+            return err;
+        }
+    }
     return 0;
 }
 
@@ -509,7 +594,12 @@ static OSStatus AVM_GetMatrixProperty(UInt32 inDataSize, UInt32* outDataSize, vo
 {
     if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
     avm_matrix m;
-    avm_engine_get_matrix(gEngine, &m);
+    // Los escritores de la matriz están serializados por gStateMutex: con él
+    // tomado, la lectura acotada siempre encuentra una copia coherente.
+    pthread_mutex_lock(&gStateMutex);
+    bool ok = avm_engine_try_get_matrix(gEngine, &m);
+    pthread_mutex_unlock(&gStateMutex);
+    if (!ok) return kAudioHardwareNotReadyError;
     CFDataRef d = CFDataCreate(kCFAllocatorDefault, (const UInt8*)m.cell, sizeof(m.cell));
     if (d == NULL) return kAudioHardwareUnspecifiedError;
     *((CFPropertyListRef*)outData) = d;  // el cliente la libera
@@ -798,7 +888,7 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
         case kAudioDevicePropertyDeviceIsAlive: RETURN_U32(1);
         case kAudioDevicePropertyDeviceIsRunning: {
             pthread_mutex_lock(&gClockMutex);
-            UInt32 running = gDeviceRunning[dev] > 0;
+            UInt32 running = gRate.running[dev] > 0;
             pthread_mutex_unlock(&gClockMutex);
             RETURN_U32(running);
         }
@@ -814,9 +904,7 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
         case kAudioDevicePropertyClockIsStable: RETURN_U32(1);
         case kAudioDevicePropertyNominalSampleRate: {
             if (inDataSize < sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
-            pthread_mutex_lock(&gClockMutex);
-            *((Float64*)outData) = gSampleRate;
-            pthread_mutex_unlock(&gClockMutex);
+            *((Float64*)outData) = AVM_CurrentRate();
             *outDataSize = sizeof(Float64);
             return 0;
         }
@@ -910,9 +998,7 @@ static OSStatus AVM_Stream_GetPropertyDataSize(const AudioObjectPropertyAddress*
 static OSStatus AVM_Stream_GetPropertyData(AudioObjectID stream, int dev, bool isInput, const AudioObjectPropertyAddress* a, UInt32 inDataSize, UInt32* outDataSize, void* outData)
 {
     UInt32 channels = AVM_StreamChannels(dev, isInput);
-    pthread_mutex_lock(&gClockMutex);
-    Float64 rate = gSampleRate;
-    pthread_mutex_unlock(&gClockMutex);
+    Float64 rate = AVM_CurrentRate();
 
 #define RETURN_U32(v) do { if (inDataSize < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError; \
         *((UInt32*)outData) = (UInt32)(v); *outDataSize = sizeof(UInt32); return 0; } while (0)
@@ -1095,8 +1181,14 @@ static OSStatus AVM_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioOb
                 if (err) return err;
                 if (inAddress->mSelector == kAudioStreamPropertyPhysicalFormat
                     && fmt != atomic_load(&gStreamFormat[inObjectID]))
-                    gHost->RequestDeviceConfigurationChange(gHost, kDevices[dev].device,
-                        AVM_ACTION(kAVM_ActionSetFormat, ((UInt64)inObjectID << 8) | (UInt64)fmt), NULL);
+                {
+                    OSStatus ferr = gHost->RequestDeviceConfigurationChange(gHost, kDevices[dev].device,
+                        AVM_ACTION(kAVM_ActionSetFormat, 0, ((UInt32)inObjectID << 8) | (UInt32)fmt), NULL);
+                    if (ferr != 0) {
+                        os_log_error(gLog, "AVMatrix: el host rechazó el cambio de formato (%d)", (int)ferr);
+                        return ferr;
+                    }
+                }
                 return 0;
             }
         }
@@ -1119,15 +1211,19 @@ static OSStatus AVM_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID i
     if (dev < 0) return kAudioHardwareBadObjectError;
 
     pthread_mutex_lock(&gClockMutex);
-    if (gRunningTotal == 0) {
+    // Durante un cambio de frecuencia no se arranca IO en ningún dispositivo.
+    avm_rate_status st = avm_rate_io_start(&gRate, (uint32_t)dev, AVM_NowNs());
+    if (st != AVM_RATE_OK) {
+        pthread_mutex_unlock(&gClockMutex);
+        return kAudioHardwareNotReadyError;
+    }
+    if (gRate.running_total == 1) {
         // Primer cliente en cualquiera de los tres dispositivos: nueva línea de
         // tiempo y buffers vacíos. Nada de audio de una sesión anterior.
         avm_engine_reset(gEngine);
         AVM_UpdateTicksPerFrame_Locked();
         gAnchorHostTime = (Float64)mach_absolute_time();
     }
-    gRunningTotal++;
-    gDeviceRunning[dev]++;
     pthread_mutex_unlock(&gClockMutex);
     return 0;
 }
@@ -1140,10 +1236,7 @@ static OSStatus AVM_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID in
     if (dev < 0) return kAudioHardwareBadObjectError;
 
     pthread_mutex_lock(&gClockMutex);
-    if (gDeviceRunning[dev] > 0) {
-        gDeviceRunning[dev]--;
-        if (gRunningTotal > 0) gRunningTotal--;
-    }
+    avm_rate_io_stop(&gRate, (uint32_t)dev);
     pthread_mutex_unlock(&gClockMutex);
     return 0;
 }

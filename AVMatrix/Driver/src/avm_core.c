@@ -190,61 +190,101 @@ void avm_float_to_sample(float v, void* dst, avm_format fmt)
 // ---------------------------------------------------------------------------
 // Motor
 
+static void avm_ring_zero_all(avm_engine* e)
+{
+    for (int s = 0; s < AVM_NUM_SOURCES; s++)
+        for (int i = 0; i < AVM_RING_FRAMES; i++)
+            atomic_store_explicit(&e->ring[s][i], 0.0f, memory_order_relaxed);
+}
+
+static void avm_slot_write(avm_matrix_slot* slot, const avm_matrix* m)
+{
+    uint64_t words[AVM_MATRIX_WORDS] = { 0 };
+    memcpy(words, m->cell, sizeof(m->cell));
+    uint32_t seq = atomic_load_explicit(&slot->seq, memory_order_relaxed);
+    atomic_store_explicit(&slot->seq, seq + 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    for (size_t i = 0; i < AVM_MATRIX_WORDS; i++)
+        atomic_store_explicit(&slot->words[i], words[i], memory_order_relaxed);
+    atomic_store_explicit(&slot->seq, seq + 2, memory_order_release);
+}
+
+// Un intento de lectura de una ranura. Devuelve false si la ranura cambió durante la copia.
+static bool avm_slot_read(avm_matrix_slot* slot, avm_matrix* out)
+{
+    uint32_t s1 = atomic_load_explicit(&slot->seq, memory_order_acquire);
+    if (s1 & 1u) return false;
+    uint64_t words[AVM_MATRIX_WORDS];
+    for (size_t i = 0; i < AVM_MATRIX_WORDS; i++)
+        words[i] = atomic_load_explicit(&slot->words[i], memory_order_relaxed);
+    atomic_thread_fence(memory_order_acquire);
+    uint32_t s2 = atomic_load_explicit(&slot->seq, memory_order_relaxed);
+    if (s1 != s2) return false;
+    memcpy(out->cell, words, sizeof(out->cell));
+    return true;
+}
+
 void avm_engine_init(avm_engine* e)
 {
-    memset(e->ring, 0, sizeof(e->ring));
+    avm_ring_zero_all(e);
     for (int g = 0; g < AVM_SRC_GROUP_COUNT; g++) {
         atomic_init(&e->written_end[g], 0);
         atomic_init(&e->valid_begin[g], 0);
+        atomic_init(&e->writing_end[g], 0);
     }
-    atomic_init(&e->matrix_seq, 0);
-    avm_matrix_default(&e->matrix);
+    atomic_init(&e->overrun_reads, 0);
+    avm_matrix m;
+    avm_matrix_default(&m);
+    for (int i = 0; i < AVM_MATRIX_SLOTS; i++) {
+        atomic_init(&e->matrix_slots[i].seq, 0);
+        for (size_t w = 0; w < AVM_MATRIX_WORDS; w++)
+            atomic_init(&e->matrix_slots[i].words[w], 0);
+        avm_slot_write(&e->matrix_slots[i], &m);
+    }
+    atomic_init(&e->matrix_published, 0);
+    for (int g = 0; g < AVM_DST_GROUP_COUNT; g++)
+        e->reader_cache[g] = m;
+    atomic_init(&e->stale_matrix_reads, 0);
 }
 
 void avm_engine_reset(avm_engine* e)
 {
-    memset(e->ring, 0, sizeof(e->ring));
+    avm_ring_zero_all(e);
     for (int g = 0; g < AVM_SRC_GROUP_COUNT; g++) {
         atomic_store_explicit(&e->written_end[g], 0, memory_order_release);
         atomic_store_explicit(&e->valid_begin[g], 0, memory_order_release);
+        atomic_store_explicit(&e->writing_end[g], 0, memory_order_release);
     }
 }
 
 void avm_engine_set_matrix(avm_engine* e, const avm_matrix* m)
 {
-    // Un solo escritor a la vez (el driver lo protege con su mutex).
-    uint32_t seq = atomic_load_explicit(&e->matrix_seq, memory_order_relaxed);
-    atomic_store_explicit(&e->matrix_seq, seq + 1, memory_order_relaxed);
-    atomic_thread_fence(memory_order_release);
-    memcpy(&e->matrix, m, sizeof(*m));
-    atomic_store_explicit(&e->matrix_seq, seq + 2, memory_order_release);
+    // Se escribe siempre en una ranura distinta de la publicada: un escritor
+    // detenido a mitad de escritura no afecta a la ranura que leen los lectores.
+    uint32_t cur = atomic_load_explicit(&e->matrix_published, memory_order_relaxed);
+    uint32_t next = (cur + 1) % AVM_MATRIX_SLOTS;
+    avm_slot_write(&e->matrix_slots[next], m);
+    atomic_store_explicit(&e->matrix_published, next, memory_order_release);
 }
 
-void avm_engine_get_matrix(const avm_engine* e, avm_matrix* out)
+bool avm_engine_try_get_matrix(avm_engine* e, avm_matrix* out)
 {
-    avm_engine* me = (avm_engine*)e;
-    for (;;) {
-        uint32_t s1 = atomic_load_explicit(&me->matrix_seq, memory_order_acquire);
-        if (s1 & 1u) continue;
-        memcpy(out, &me->matrix, sizeof(*out));
-        atomic_thread_fence(memory_order_acquire);
-        uint32_t s2 = atomic_load_explicit(&me->matrix_seq, memory_order_relaxed);
-        if (s1 == s2) return;
+    for (int attempt = 0; attempt < AVM_MATRIX_READ_ATTEMPTS; attempt++) {
+        uint32_t idx = atomic_load_explicit(&e->matrix_published, memory_order_acquire);
+        if (idx >= AVM_MATRIX_SLOTS) return false;
+        if (avm_slot_read(&e->matrix_slots[idx], out)) return true;
     }
+    return false;
 }
 
 static void avm_zero_range(avm_engine* e, int base, int nch, int64_t from, int64_t to)
 {
     if (to <= from) return;
-    if (to - from >= AVM_RING_FRAMES) {
-        for (int c = 0; c < nch; c++)
-            memset(e->ring[base + c], 0, sizeof(e->ring[0]));
-        return;
-    }
+    if (to - from > AVM_RING_FRAMES) from = to - AVM_RING_FRAMES;
     for (int64_t t = from; t < to; t++) {
         int64_t idx = t & AVM_RING_MASK;
         for (int c = 0; c < nch; c++)
-            e->ring[base + c][idx] = 0.0f;
+            atomic_store_explicit(&e->ring[base + c][idx], 0.0f, memory_order_relaxed);
     }
 }
 
@@ -261,6 +301,13 @@ void avm_engine_write(avm_engine* e, avm_src_group g, int64_t sample_time,
     if (frames > AVM_VALID_WINDOW) frames = AVM_VALID_WINDOW;
 
     const int64_t we = atomic_load_explicit(&e->written_end[g], memory_order_acquire);
+    const int64_t end = sample_time + (int64_t)frames;
+
+    // Publicar hasta dónde se va a escribir antes de tocar el buffer
+    // (contador de seqlock: almacenamiento + barrera de liberación).
+    if (end > atomic_load_explicit(&e->writing_end[g], memory_order_relaxed))
+        atomic_store_explicit(&e->writing_end[g], end, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
     // Si hubo un hueco (la aplicación dejó de enviar), se borra para que el
     // lector nunca reciba audio viejo como si fuera nuevo.
     if (sample_time > we)
@@ -275,26 +322,28 @@ void avm_engine_write(avm_engine* e, avm_src_group g, int64_t sample_time,
         const uint8_t* fp = in + (size_t)f * frame_bytes;
         for (int c = 0; c < nch; c++) {
             float v = ((uint32_t)c < channels) ? avm_sample_to_float(fp + (size_t)c * bps, fmt) : 0.0f;
-            e->ring[base + c][idx] = v;
+            atomic_store_explicit(&e->ring[base + c][idx], v, memory_order_relaxed);
         }
     }
 
-    int64_t end = sample_time + (int64_t)frames;
     if (end > we)
         atomic_store_explicit(&e->written_end[g], end, memory_order_release);
 }
 
-void avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
+bool avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
                      uint32_t frames, void* interleaved, avm_format fmt,
                      uint32_t channels)
 {
     if ((int)g < 0 || g >= AVM_DST_GROUP_COUNT || frames == 0 || interleaved == NULL)
-        return;
+        return true;
     const uint32_t bps = avm_format_bytes_per_sample(fmt);
-    if (bps == 0 || channels == 0) return;
+    if (bps == 0 || channels == 0) return true;
 
-    avm_matrix m;
-    avm_engine_get_matrix(e, &m);
+    // Lectura acotada de la matriz; si no hay copia coherente se usa la última válida.
+    avm_matrix* m_cache = &e->reader_cache[g];
+    if (!avm_engine_try_get_matrix(e, m_cache))
+        atomic_fetch_add_explicit(&e->stale_matrix_reads, 1, memory_order_relaxed);
+    const avm_matrix* mp = m_cache;
 
     int64_t lo[AVM_SRC_GROUP_COUNT], hi[AVM_SRC_GROUP_COUNT];
     for (int sg = 0; sg < AVM_SRC_GROUP_COUNT; sg++) {
@@ -312,11 +361,14 @@ void avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
     // Lista de fuentes conectadas a cada destino de este grupo.
     int srcs[AVM_CHANNELS_PER_PORT][AVM_NUM_SOURCES];
     int nsrc[AVM_CHANNELS_PER_PORT];
+    bool group_used[AVM_SRC_GROUP_COUNT] = { false };
     for (int d = 0; d < dnch; d++) {
         nsrc[d] = 0;
         for (int s = 0; s < AVM_NUM_SOURCES; s++)
-            if (m.cell[dbase + d][s] && avm_route_allowed(dbase + d, s) == AVM_ROUTE_OK)
+            if (mp->cell[dbase + d][s] && avm_route_allowed(dbase + d, s) == AVM_ROUTE_OK) {
                 srcs[d][nsrc[d]++] = s;
+                group_used[avm_src_group_of(s)] = true;
+            }
     }
 
     uint8_t* out = (uint8_t*)interleaved;
@@ -332,10 +384,25 @@ void avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
                     int s = srcs[c][k];
                     int sg = (int)avm_src_group_of(s);
                     if (t >= lo[sg] && t < hi[sg])
-                        acc += e->ring[s][idx];
+                        acc += atomic_load_explicit(&e->ring[s][idx], memory_order_relaxed);
                 }
             }
             avm_float_to_sample(acc, fp + (size_t)c * bps, fmt);
         }
     }
+
+    // Validación posterior (lado lector del seqlock): si mientras se leía el
+    // escritor llegó a escribir el instante t + AVM_RING_FRAMES de alguna fuente
+    // usada, las muestras leídas pueden ser de otra vuelta del buffer.
+    atomic_thread_fence(memory_order_acquire);
+    for (int sg = 0; sg < AVM_SRC_GROUP_COUNT; sg++) {
+        if (!group_used[sg]) continue;
+        int64_t wb = atomic_load_explicit(&e->writing_end[sg], memory_order_relaxed);
+        if (wb - (int64_t)AVM_RING_FRAMES > sample_time) {
+            memset(out, 0, (size_t)frames * frame_bytes);  // cero en todos los formatos
+            atomic_fetch_add_explicit(&e->overrun_reads, 1, memory_order_relaxed);
+            return false;
+        }
+    }
+    return true;
 }

@@ -61,20 +61,39 @@ cd AVMatrix
 scripts/build.sh
 ```
 
-`build.sh` muestra la versión de macOS y de las herramientas, y compila el driver, la app y `avmctl` como binarios universales (Apple Silicon + Intel). Los firma ad hoc y ejecuta las pruebas del núcleo. El resultado queda en `build/mac/`.
+`build.sh` muestra la versión de macOS y de las herramientas, y compila el driver, la app y `avmctl` como binarios universales (Apple Silicon + Intel). Los firma, verifica las firmas y ejecuta las pruebas (núcleo, frecuencia e instalador). El resultado queda en `build/mac/`.
 
-Si no se puede compilar en el Mac, `dist/` contiene una compilación precompilada. Se generó con compilación cruzada contra el SDK de macOS 15.5. `install.sh` la usa si no encuentra `build/mac/`, y la vuelve a firmar en el Mac.
+Para firmar con una identidad propia (por ejemplo Developer ID): `AVM_SIGN_IDENTITY="Developer ID Application: …" scripts/build.sh`. Sin esa variable se firma ad hoc.
+
+Si no se puede compilar en el Mac, `dist/` contiene una compilación precompilada. Se generó con compilación cruzada contra el SDK de macOS 15.5. Solo lleva la firma del enlazador, así que el instalador la rechaza salvo que se elija la firma de forma explícita (ver «Instalar»).
 
 ## 4. Instalar
 
 ```bash
-sudo scripts/install.sh
+sudo scripts/install.sh --dry-run      # solo comprueba; no toca nada instalado
+sudo scripts/install.sh                # instala, reinicia coreaudiod y comprueba
+sudo scripts/install.sh --no-restart   # instala sin reiniciar coreaudiod
 ```
 
-- Si ya hay una versión instalada, primero la copia en `~/AVMatrix-backups/<fecha>/`.
-- Instala `AVMatrix.driver` en `/Library/Audio/Plug-Ins/HAL/`, la app en `/Applications/AV Matrix.app` y `avmctl` en `/usr/local/bin/`.
-- Reinicia `coreaudiod`. **Todo el audio del Mac se corta unos segundos.** Cierre Smaart y LISTENTO antes.
-- Al terminar muestra `avmctl status`.
+La instalación es transaccional:
+
+1. **Valida los tres componentes** antes de tocar nada: Info.plist, identificador, tipo AudioServerPlugIn y fábrica del driver, ejecutables, arquitectura del Mac y firma.
+2. **Prepara las copias en staging** junto a cada destino y comprueba allí las firmas.
+3. **Respalda** lo instalado en `~/AVMatrix-backups/<fecha>/` y verifica la copia.
+4. **Sustituye** el driver (`/Library/Audio/Plug-Ins/HAL/`), la app (`/Applications/AV Matrix.app`) y `avmctl` (`/usr/local/bin/`).
+5. **Reinicia `coreaudiod`** (todo el audio del Mac se corta unos segundos; cierre Smaart y LISTENTO antes) y espera a que `avmctl status` encuentre los tres dispositivos.
+
+Si **cualquier paso falla**, restaura la versión anterior (y reinicia `coreaudiod` con ella si ya lo había reiniciado) y termina con error. Con `--no-restart` verifica los archivos y deja **pendiente** la comprobación de funcionamiento.
+
+**Firma:**
+
+| Elección | Qué hace |
+| --- | --- |
+| Nada (recomendado tras `build.sh`) | Exige que los tres componentes ya tengan firma válida; no firma nada |
+| `--sign-identity=-` (o `AVM_SIGN_IDENTITY=-`) | Firma ad hoc **solo** lo que no tenga firma válida (necesario para `dist/`). Una firma Developer ID válida **se conserva** |
+| `--sign-identity="Developer ID Application: …"` | Firma con esa identidad lo que no esté ya firmado por ella |
+
+Los errores de firma detienen la instalación; nunca se ignoran.
 
 Comprobación manual: en **Configuración de Audio MIDI** deben aparecer los tres dispositivos.
 
@@ -120,6 +139,8 @@ avmctl test-all                     autoprueba en 3 frecuencias x 4 formatos (~1
 
 **Frecuencias:** 44 100, 48 000 y 96 000 Hz. Los tres dispositivos cambian juntos.
 
+**El cambio de frecuencia solo se admite sin audio activo** en ninguno de los tres dispositivos. Detenga el audio en Smaart, cierre LISTENTO y pare la música, y luego cambie la frecuencia (en la app, con `avmctl rate` o en Smaart). Si hay audio activo, el cambio se rechaza con un aviso. Así ningún dispositivo funciona nunca a una frecuencia distinta de la que macOS cree. Si macOS cancela un cambio a medias, el driver vuelve a la frecuencia anterior en los tres.
+
 **Formato que ven las aplicaciones (formato virtual):** siempre **32 bits coma flotante**. Así funciona CoreAudio: Smaart, LISTENTO y los demás programas intercambian audio en Float32 con el HAL.
 
 **Formatos físicos** (se eligen por stream en Configuración de Audio MIDI o con `avmctl format`):
@@ -148,12 +169,15 @@ Pasar audio de una salida a una entrada virtual requiere al menos un ciclo de bu
 
 ```
 Driver/src/avm_core.[ch]      núcleo portable: matriz, buffers, formatos, reglas anti-lazo
+Driver/src/avm_rate.[ch]      transacción de cambio de frecuencia (portable, probada)
 Driver/src/AVMatrixDriver.c   AudioServerPlugIn (3 dispositivos, reloj común)
 Driver/Info.plist
 Client/avm_client.[ch]        acceso CoreAudio compartido
 Client/avmctl.c               herramienta de Terminal y autoprueba
 App/AVMatrixApp.m             app de la matriz (AppKit)
-tests/test_core.c             pruebas unitarias del núcleo
+tests/test_core.c             pruebas del núcleo (matriz, buffers, formatos, concurrencia)
+tests/test_rate.c             pruebas de la transacción de frecuencia
+tests/test_install.sh         pruebas del instalador con herramientas simuladas (tests/fakes)
 scripts/                      build.sh, install.sh, uninstall.sh
 dist/                         compilación precompilada (cruzada, SDK 15.5)
 docs/INFORME_CODEX.md         informe de revisión

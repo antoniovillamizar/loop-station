@@ -140,6 +140,11 @@ static int cmd_rate(const char* s)
 {
     Float64 r = atof(s);
     OSStatus err = avm_set_sample_rate(r);
+    if (err == kAudioHardwareNotReadyError) {
+        fprintf(stderr, "No se puede cambiar la frecuencia con audio activo en AV Matrix.\n"
+                        "Detenga el audio en Smaart, LISTENTO y la música, y vuelva a intentarlo.\n");
+        return 1;
+    }
     if (err) { print_err("cambiar frecuencia", err); return 1; }
     if (!wait_for_rate(r)) { fprintf(stderr, "La frecuencia no cambió a %.0f Hz.\n", r); return 1; }
     printf("Frecuencia: %.0f Hz (los tres dispositivos comparten reloj)\n", r);

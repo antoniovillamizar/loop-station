@@ -1,0 +1,46 @@
+#!/bin/bash
+# codesign simulado. El estado de firma viaja con el código:
+#   bundle:  archivo <bundle>/Contents/_CodeSignature/fake
+#   archivo: línea "#SIG=..." dentro del propio archivo
+# Valor: "adhoc", "id:<autoridad>" o "invalid".
+state() {
+    if [ -d "$1" ]; then
+        [ -f "$1/Contents/_CodeSignature/fake" ] && cat "$1/Contents/_CodeSignature/fake" || echo invalid
+    else
+        local v; v=$(grep -m1 "^#SIG=" "$1" 2>/dev/null | sed 's/^#SIG=//'); echo "${v:-invalid}"
+    fi
+}
+setstate() {
+    if [ -d "$1" ]; then
+        mkdir -p "$1/Contents/_CodeSignature"; echo "$2" > "$1/Contents/_CodeSignature/fake"
+    else
+        grep -v "^#SIG=" "$1" > "$1.tmp"; echo "#SIG=$2" >> "$1.tmp"; cat "$1.tmp" > "$1"; rm -f "$1.tmp"
+    fi
+}
+mode="" ident="" path=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --verify) mode=verify ;;
+        -dvv|-d) mode=display ;;
+        --sign|-s) mode=sign; ident="$2"; shift ;;
+        --force|--strict|--deep|--timestamp=none|--verbose*|-v) ;;
+        *) path="$1" ;;
+    esac
+    shift
+done
+case "$mode" in
+    verify) [ "$(state "$path")" != invalid ] ;;
+    display)
+        s=$(state "$path")
+        echo "Executable=$path" >&2
+        case "$s" in
+            adhoc) echo "Signature=adhoc" >&2 ;;
+            id:*)  echo "Authority=${s#id:}" >&2; echo "Authority=Developer ID Certification Authority" >&2 ;;
+            *)     echo "$path: code object is not signed at all" >&2; exit 1 ;;
+        esac ;;
+    sign)
+        echo "sign $ident $path" >> "${FAKE_LOG:-/dev/null}"
+        [ -z "${FAKE_SIGN_FAIL:-}" ] || { echo "fallo simulado de firma" >&2; exit 1; }
+        if [ "$ident" = "-" ]; then setstate "$path" adhoc; else setstate "$path" "id:$ident"; fi ;;
+    *) exit 2 ;;
+esac
