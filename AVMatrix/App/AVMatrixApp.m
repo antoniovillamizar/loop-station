@@ -717,44 +717,61 @@ static NSString* const kRenameSaveFailed = @"No se pudo guardar el nombre en dis
     NSString* original = ChannelDefault(self.index);
     NSString* full = self.index < AVM_NUM_SOURCES ? SourceLongName(self.index) : DestLongName(self.index - AVM_NUM_SOURCES);
 
-    NSTextField* title = [NSTextField labelWithString:[NSString stringWithFormat:@"Nombre del canal %@ — %@", ChannelNumber(self.index), full]];
+    // Todo el contenido tiene el ancho interior fijo (kRenameW menos márgenes):
+    // los textos largos pasan a varias líneas o se recortan con «…», pero nunca
+    // ensanchan el panel.
+    const CGFloat inner = kRenameW - 24;
+
+    // Título: hasta 2 líneas (alias de 32 caracteres + «(REFERENCIA LOCAL)»).
+    NSTextField* title = [NSTextField wrappingLabelWithString:[NSString stringWithFormat:@"Nombre del canal %@ — %@", ChannelNumber(self.index), full]];
     title.font = [NSFont boldSystemFontOfSize:12];
-    title.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    title.maximumNumberOfLines = 2;
+    title.cell.truncatesLastVisibleLine = YES;
+    title.preferredMaxLayoutWidth = inner;
+    // Subtítulo: una línea, recortada en el centro si no cabe.
     NSTextField* sub = [NSTextField labelWithString:[NSString stringWithFormat:@"Original: «%@» · identificador: %@", original, key]];
     sub.font = [NSFont systemFontOfSize:10];
     sub.textColor = [NSColor secondaryLabelColor];
+    sub.lineBreakMode = NSLineBreakByTruncatingMiddle;
 
     self.field = [NSTextField textFieldWithString:ChannelAlias(self.index) ?: original];
     self.field.placeholderString = original;
     self.field.delegate = self;
-    [self.field.widthAnchor constraintGreaterThanOrEqualToConstant:280].active = YES;
 
     // Mensaje de error en varias líneas si hace falta: nunca se recorta.
     self.errorLabel = [NSTextField wrappingLabelWithString:@""];
     self.errorLabel.font = [NSFont systemFontOfSize:10];
     self.errorLabel.textColor = [NSColor systemRedColor];
-    self.errorLabel.preferredMaxLayoutWidth = kRenameW - 24;
+    self.errorLabel.preferredMaxLayoutWidth = inner;
     self.errorLabel.hidden = YES;
 
-    NSTextField* help = [NSTextField labelWithString:[NSString stringWithFormat:@"Enter guarda · Esc cancela · vacío = nombre original · máximo %d caracteres", AVM_ALIAS_MAX_CHARS]];
+    NSTextField* help = [NSTextField wrappingLabelWithString:[NSString stringWithFormat:@"Enter guarda · Esc cancela · vacío = nombre original · máximo %d caracteres", AVM_ALIAS_MAX_CHARS]];
     help.font = [NSFont systemFontOfSize:10];
     help.textColor = [NSColor tertiaryLabelColor];
+    help.preferredMaxLayoutWidth = inner;
 
     NSButton* restore = [NSButton buttonWithTitle:@"Restaurar nombre original" target:self action:@selector(restore:)];
     restore.enabled = avm_names_get(&gNames, self.index) != NULL;
     NSButton* cancel = [NSButton buttonWithTitle:@"Cancelar" target:self action:@selector(cancel:)];
     NSButton* save = [NSButton buttonWithTitle:@"Guardar" target:self action:@selector(save:)];
     save.keyEquivalent = @"\r";
-    NSStackView* buttons = [NSStackView stackViewWithViews:@[ restore, [NSView new], cancel, save ]];
+    NSView* spacer = [NSView new];
+    [spacer setContentHuggingPriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView* buttons = [NSStackView stackViewWithViews:@[ restore, spacer, cancel, save ]];
     buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
 
-    NSStackView* v = [NSStackView stackViewWithViews:@[ title, sub, self.field, self.errorLabel, help, buttons ]];
+    NSArray<NSView*>* rows = @[ title, sub, self.field, self.errorLabel, help, buttons ];
+    NSStackView* v = [NSStackView stackViewWithViews:rows];
     v.orientation = NSUserInterfaceLayoutOrientationVertical;
     v.alignment = NSLayoutAttributeLeading;
     v.spacing = 6;
     v.edgeInsets = NSEdgeInsetsMake(12, 12, 12, 12);
+    // Ancho obligatorio para cada fila; el texto cede (compresión baja), no el panel.
+    for (NSView* row in rows) {
+        [row.widthAnchor constraintEqualToConstant:inner].active = YES;
+        [row setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    }
     [v.widthAnchor constraintEqualToConstant:kRenameW].active = YES;
-    [self.errorLabel.widthAnchor constraintEqualToConstant:kRenameW - 24].active = YES;
     self.view = v;
     [self updateSize];
 }
@@ -766,8 +783,7 @@ static NSString* const kRenameSaveFailed = @"No se pudo guardar el nombre en dis
     NSView* v = self.view;
     [v layoutSubtreeIfNeeded];
     NSSize s = v.fittingSize;
-    s.width = MAX(s.width, kRenameW);
-    s.width = ceil(s.width);
+    s.width = kRenameW;          // el ancho es fijo; solo cambia el alto
     s.height = ceil(s.height);
     [v setFrameSize:s];
     self.preferredContentSize = s;

@@ -1,8 +1,65 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 9; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 10; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 9 — tamaño del panel de nombres y ciclo de retención (sobre `277acc5`)
+## 0. Revisión 10 — ancho fijo del panel de nombres y espera de la prueba de liberación (sobre `2ae5475`)
+
+Codex ejecutó `AVM_UI_NO_WINDOW=1 bash scripts/build.sh` en el Mac: `test_rename_ui` dio 16 correctas y 3 fallos. `--app-only` pasó con firmas reales (incluida la restauración) y **no cambia**. Antes de modificar se hizo una copia de seguridad del proyecto en `2ae5475`. **No se instaló nada ni se reinició coreaudiod.** Solo cambian la app y sus pruebas: el driver y `avmctl` de `dist/` siguen idénticos.
+
+**Qué se comprobó y dónde:**
+- **En Linux:** compilación cruzada de la app, de la prueba nativa y de un mutante (arm64 y x86_64), comprobaciones estáticas y todas las suites.
+- **En un Mac:** nada nuevo todavía. `test_rename_ui` y `tests/mutate_rename_ui.sh` **no se han ejecutado**.
+
+### 0.10.1 Ancho del panel (`App/AVMatrixApp.m:726-790`)
+
+**Causa probable:** NSStackView no deja recortar sus filas (su resistencia al recorte es obligatoria por defecto). El título de una sola línea, con un alias largo en la Entrada 8, pedía unos 567 pt. La pila se ensanchaba a 591 pt e invalidaba la restricción de 420 pt, y el popover se quedaba en 420.
+
+**Corrección:**
+- **Ancho de cada fila:** todas (título, subtítulo, campo, error, ayuda y botones) tienen un ancho **obligatorio** igual al interior (420 − 24 = 396 pt), con resistencia horizontal a la compresión baja (`:771`). El texto cede; el panel no.
+- **Textos:**
+  - el **título** pasa a ser una etiqueta de **hasta 2 líneas** (`:726`), con «…» al final si aún no cabe, así que se lee entero el alias de 32 caracteres con «(REFERENCIA LOCAL)»;
+  - el **subtítulo** usa una línea recortada en el centro;
+  - la **ayuda** y el **error** usan varias líneas, con `preferredMaxLayoutWidth` = 396.
+- **Tamaño** (`updateSize`, `:781`): el ancho es siempre `kRenameW` y solo el alto sale de `fittingSize`. Mostrar un error **aumenta el alto sin ensanchar**.
+
+### 0.10.2 Prueba de liberación (`tests/test_rename_ui.m`)
+
+- **Espera acotada:** `wait_released` (`:37`) ejecuta el bucle principal (20 ms por vuelta) hasta que no quede ningún objeto vivo o se agote el plazo: 2 s sin mostrar el panel y 3 s mostrado. Así se cubre el *autorelease* diferido de AppKit que vio Codex (50 controladores vivos al vaciar el pool, 0 tras 0,5 s).
+- **Control dentro de la propia prueba:** `test_detects_real_cycle` (`:155`) crea un ciclo real con `objc_setAssociatedObject` (el controlador retiene su popover). Comprueba que **tras la espera siguen vivos los dos objetos** (la espera no oculta fugas) y que se liberan al romper el ciclo.
+- **Mutaciones nativas:** `tests/mutate_rename_ui.sh` (solo Mac) compila la prueba contra copias alteradas de la app (`-DAVM_APP_FILE`) y exige que falle con el motivo esperado:
+  - **M1:** `popover` vuelve a ser `strong` (el ciclo original). Debe dar «siguen vivos».
+  - **M2:** sin el ancho fijo de las filas (el error original). Debe dar «título largo».
+
+  Las copias se crean y se borran junto a la app; el original no se toca. En Linux se comprobó que los dos patrones cambian el archivo y que el mutante M1 compila; **la ejecución queda pendiente en el Mac**.
+- **Más comprobaciones:**
+  - el ancho debe ser exactamente `kRenameW`;
+  - `rowsInside`: ninguna fila visible sale de la vista, también con el error;
+  - los mensajes de fallo muestran los tamaños.
+- Se quitó una comprobación sin valor (campo editable con U+FFFE).
+- **Total:** 22 comprobaciones con `AVM_UI_NO_WINDOW=1` y 40 con el panel en pantalla.
+
+### 0.10.3 Resultados (Linux)
+
+| Suite | Resultado |
+| --- | --- |
+| Núcleo | 122/122 |
+| Frecuencia | 115/115 |
+| Medidores | 117/117 |
+| Nombres | 51/51 |
+| Instalador | 102/102 (sin cambios, incluido `--app-only`) |
+| `build.sh` | 20/20 |
+| Textos | 20/20 (+3: ancho fijo por fila, ancho de `updateSize`, sin `MAX` con `fittingSize`) |
+
+Sanitizers sin avisos. Compilación cruzada sin avisos.
+
+**Pendiente en el Mac:**
+```bash
+AVM_UI_NO_WINDOW=1 bash scripts/build.sh     # «Panel de nombres: 22 comprobaciones correctas, 0 fallos»
+bash scripts/build.sh                        # con el panel en pantalla: 40 correctas
+bash tests/mutate_rename_ui.sh               # «Mutaciones del panel: 2 detectadas, 0 fallos»
+```
+
+## 0quater. Revisión 9 — tamaño del panel de nombres y ciclo de retención (sobre `277acc5`)
 
 Codex comprobó `277acc5` en el Mac (Enter, Escape, restauración, persistencia, tildes y fallo de guardado correctos) y encontró dos problemas en el panel de nombres. Antes de modificar se hizo una copia de seguridad del proyecto en `277acc5`. **No se instaló nada ni se reinició coreaudiod.** **Solo cambia la app:** el driver y `avmctl` de `dist/` son byte a byte iguales a los de `277acc5`.
 

@@ -29,6 +29,9 @@ check "el panel guarda su NSPopover con referencia débil" grep -q "@property (w
 check "ningún controlador del panel retenido fuera del popover" bash -c '! grep -q "AVMRenameController\* renamer" "$1"' _ "$APP"
 check "el NSPopover recibe un contentSize explícito" grep -q "pop.contentSize = rc.preferredContentSize;" "$APP"
 check "el tamaño se recalcula al mostrar un error" bash -c 'grep -A4 "^- (void)showMessage:" "$1" | grep -q "updateSize"' _ "$APP"
+check "cada fila del panel tiene el ancho interior fijo" grep -q "\[row.widthAnchor constraintEqualToConstant:inner\].active = YES;" "$APP"
+check "el ancho del panel no depende del texto" bash -c 'grep -A5 "^- (void)updateSize" "$1" | grep -q "s.width = kRenameW;"' _ "$APP"
+check "el panel no toma el ancho de fittingSize" bash -c '! grep -q "MAX(s.width, kRenameW)" "$1"' _ "$APP"
 check "el AVMController suelta el panel al cerrarse" bash -c 'grep -A5 "^- (void)popoverDidClose:" "$1" | grep -q "self.renamePopover = nil"' _ "$APP"
 
 echo "Textos de la app: $PASS comprobaciones correctas, $FAIL fallos"
