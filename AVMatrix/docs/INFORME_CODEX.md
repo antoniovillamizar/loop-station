@@ -1,8 +1,81 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 12; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 13; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 12 — mixer: volumen (solo atenuación) y MUTE por canal (sobre `fddbc62`)
+## 0. Revisión 13 — mixer: arranque con MUTE, guardado ordenado y veredicto de la autoprueba (sobre `ee604ad`)
+
+Codex revisó `ee604ad` y encontró tres problemas. Antes de modificar se hizo una copia de seguridad del proyecto en `ee604ad`. **No se instaló nada ni se reinició coreaudiod.** Cambian el motor, el driver y `avmctl`: hay que instalar con `install.sh` completo, no con `--app-only`.
+
+**Qué se comprobó y dónde:**
+- **En Linux:** todas las pruebas nuevas, con ASan, UBSan y TSan; las mutaciones; la comparación bit a bit a 0 dB; la compilación cruzada.
+- **En un Mac:** nada todavía.
+
+### 0.13.1 Un canal ya silenciado dejaba pasar audio al arrancar
+
+- **Causa (confirmada):** las rampas solo se ajustaban al objetivo en el arranque global (`avm_engine_reset`, primer cliente). Si Smaart ya estaba activo y Música arrancaba en MUTE, Música hacía una rampa desde el último nivel aplicado. La mutación que reproduce el código anterior da exactamente la primera muestra de Codex: **0,998046875**.
+- **Corrección** (`avm_core.c`, `avm_group_begin`, `:593`): al empezar cada bloque, el hilo de IO dueño del grupo pone sus canales directamente en el volumen y el MUTE vigentes, **sin rampa**, si el audio del grupo empieza o se reanuda. Eso ocurre en tres casos:
+  - **primer bloque:** el grupo nunca había procesado audio;
+  - **bloque no contiguo:** el instante no sigue al del bloque anterior (una pausa, un stream inactivo, una reanudación);
+  - **arranque pedido por el driver:** `AVM_StartIO` lo pide (`avm_engine_request_settle_src/dst`, `:577`) cuando **ese** dispositivo pasa de parado a activo (`gRate.running[dev] == 1`, `AVMatrixDriver.c:1404`). Es un almacenamiento atómico que el hilo de IO consume con un intercambio atómico.
+- **Los demás dispositivos no se reinician.** Con el audio en marcha y contiguo, los cambios siguen usando la rampa de 512 muestras.
+- Se aplica igual a los destinos: LISTENTO, al empezar a leer con un Envío ya en MUTE o atenuado, lo respeta desde la primera muestra.
+- A 0 dB sin mute la salida sigue **idéntica bit a bit a `fddbc62`** (`tests/compare_engine_unity.sh`).
+
+### 0.13.2 Los ajustes podían guardarse fuera de orden
+
+- **Causa:** `AVM_SetMixerProperty` aplicaba bajo `gStateMutex` y guardaba fuera. Con A y B simultáneos se podía aplicar A, B y guardar B, A. **`AVM_SetMatrixProperty` tenía el mismo problema** y también se corrige.
+- **Corrección:** módulo nuevo `Driver/src/avm_persist.[ch]`, portable y probado en Linux.
+  - Cada cambio se aplica bajo `gStateMutex` y recibe una generación.
+  - Después, bajo un mutex propio de guardado, se vuelve a leer el **estado vigente** bajo `gStateMutex` y se guarda ese, solo si es más nuevo que el último guardado.
+  - Así **el último guardado siempre contiene el último ajuste aplicado**, sea cual sea el orden en que terminen los guardados.
+  - El almacenamiento, que es lento, nunca se escribe con `gStateMutex` tomado, y el hilo de audio no toma ninguno de los dos mutex.
+- Lo usan la matriz y el mixer (`AVM_SetMixerProperty`, `:743`).
+
+### 0.13.3 La autoprueba no fallaba si no podía restaurar
+
+- **Corrección:** `Client/avm_selftest.h` (nuevo) decide el veredicto. `avmctl test` registra cualquier fallo al restaurar **la frecuencia, los formatos, el mixer o la matriz** (`Client/avmctl.c:773`). En ese caso termina con «RESULTADO: HAY FALLOS (no se pudo restaurar el estado anterior)» y **código 1**, aunque el audio haya pasado.
+- **Fase nueva 2d en `avmctl test`** (`:691`, `run_devices_staggered`, `:471`): reproduce en el Mac el caso de Codex.
+  - Smaart arranca, y con Smaart ya en marcha se aplica el mixer: Música L en MUTE, Música R a −6 dB, Envío 1 en MUTE y Envío 2 a −6 dB.
+  - Después arranca Música y, al final, LISTENTO, sin detener a los anteriores.
+  - Desde la primera muestra solo se admiten 0 (antes de que llegue la fuente) o el valor exacto; **cualquier valor intermedio es un fallo**.
+
+### 0.13.4 Pruebas
+
+| Prueba | Dónde | Qué comprueba |
+| --- | --- | --- |
+| `tests/test_mixer.c` (+14, 99) | Linux, ASan, UBSan, TSan | **Caso de Codex:** Smaart activo, Música en MUTE y a −6 dB antes de abrir su audio: silencio y 0,5 desde la primera muestra, y Smaart sin cambios. **Reanudación** de Música tras una pausa con ajustes nuevos. **Destino LISTENTO** ya en MUTE o atenuado al empezar a leer, y lectura reanudada. **Arranque pedido** por StartIO con un bloque contiguo. Sin petición y contiguo, la rampa se mantiene; la petición es por grupo. Con el audio en marcha, el MUTE sigue con rampa. **Mutación** (quitar el ajuste al arrancar): 10 fallos, con la primera muestra 0,998047, como en la revisión de Codex |
+| `tests/test_persist.c` (nueva, 13) | Linux, ASan, UBSan, TSan | Almacenamiento simulado **deliberadamente desordenado**. **Caso de Codex:** el método anterior reproduce MUTE vigente 1 y guardado 0; el nuevo guarda 1. **Retraso entre aplicar y guardar.** **A guarda antes que B** pero después de que B se aplique: se guarda el estado vigente (B). **8 hilos × 60 cambios** de mixer y matriz con guardados aleatorios: lo guardado es lo vigente y la última generación aplicada es la guardada. Un ajuste rechazado no escribe. **Mutaciones:** guardar el valor pedido en vez del vigente (1 fallo) y quitar el mutex de guardado (3 fallos) |
+| `tests/test_selftest.c` (nueva, 8) | Linux | Las 32 combinaciones: código 0 y «CORRECTO» solo si todo pasó y todo se restauró. Falla restaurar el mixer, la matriz, la frecuencia o un formato: código 1 |
+| `tests/test_avmctl_static.sh` (nueva, 8) | Linux | `avmctl` registra cada fallo al restaurar y sale con el veredicto. La versión `ee604ad` da 7 fallos; quitar el registro del mixer da 1 |
+| `tests/test_build_script.sh` (+4, 31) | Linux | El driver incluye `avm_persist.c`; `build.sh` ejecuta las pruebas nuevas |
+
+**Resultados (Linux):**
+
+| Suite | Resultado |
+| --- | --- |
+| Núcleo | 122/122 |
+| Frecuencia | 115/115 |
+| Medidores | 117/117 |
+| Nombres | 51/51 |
+| Manual | 328/328 |
+| **Mixer** | **99/99** |
+| Faders | 17/17 |
+| **Motor a 0 dB** | **idéntico a `fddbc62`** |
+| **Guardado** | **13/13** |
+| **Veredicto** | **8/8** |
+| **avmctl** | **8/8** |
+| Instalador | 102/102 |
+| `build.sh` | 31/31 |
+| Textos | 36/36 |
+
+Sanitizers sin avisos. Compilación cruzada de driver, app, `avmctl` y pruebas nativas sin avisos.
+
+**Pendiente en el Mac:**
+- `avmctl test` y `test-all`: las cuatro líneas «arranque:» de la fase 2d y la fase 2c deben salir OK.
+- Repetir a mano el caso de Codex (Música en MUTE con Smaart activo, y después abrir Música).
+- Persistencia tras reiniciar.
+
+## 0septies-bis. Revisión 12 — mixer: volumen (solo atenuación) y MUTE por canal (sobre `fddbc62`)
 
 Encargo: una ventana «Mixer» con volumen y MUTE para las 18 entradas a la matriz y las 16 salidas. Antes de modificar se hizo una copia de seguridad del proyecto en `fddbc62`. **No se instaló nada ni se reinició coreaudiod.**
 

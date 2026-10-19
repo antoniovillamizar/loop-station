@@ -100,6 +100,7 @@ Anota lo que observes:
 - [ ] Botón «Ayuda» y menú Ayuda → Manual de AV Matrix: ¿se abre el manual? ¿Lleva cada entrada del índice a su sección? ¿Se puede agrandar y achicar la ventana?
 - [ ] Mixer recién instalado: ¿los 34 canales están a 0 dB y sin MUTE? (`avmctl mixer` debe decir «Todos los canales a 0 dB y sin mute».)
 - [ ] `avmctl test`: ¿pasa también la fase del mixer (−6 dB, MUTE, suma · −6 dB) y termina con «Matriz, mixer, frecuencia y formatos restaurados»?
+- [ ] `avmctl test`: ¿pasan las 4 líneas «arranque:» (Música y LISTENTO arrancan con canales ya en MUTE o a −6 dB mientras Smaart sigue activo, sin dejar pasar audio)?
 - [ ] Con el ruido rosa: baja el fader de **LISTENTO Envío 1** a unos −12 dB. ¿Baja su medidor sin chasquidos y sin cortes? ¿Smaart Entrada 8 (referencia) sigue igual? Vuelve a 0 dB con doble clic.
 - [ ] MUTE en **Smaart Entrada 8**: ¿Smaart deja de ver la referencia? Quita el MUTE: ¿vuelve al nivel anterior?
 - [ ] «Silenciar todos» y después «Restaurar 0 dB y quitar mutes…»: ¿se silencia todo y vuelve todo a 0 dB (con confirmación)?

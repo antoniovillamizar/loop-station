@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "avm_core.h"
+#include "avm_persist.h"
 #include "avm_rate.h"
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,10 @@ static const AVM_DeviceDesc kDevices[kAVM_NumDevices] = {
 #pragma mark Estado
 
 static pthread_mutex_t          gStateMutex = PTHREAD_MUTEX_INITIALIZER;
+// Guardado ordenado de la matriz y del mixer: lo guardado es siempre el último
+// ajuste aplicado, aunque dos cambios lleguen a la vez (ver avm_persist.h).
+static avm_persist              gPersistMatrix;
+static avm_persist              gPersistMixer;
 static pthread_mutex_t          gClockMutex = PTHREAD_MUTEX_INITIALIZER;
 static UInt32                   gRefCount = 0;
 static AudioServerPlugInHostRef gHost = NULL;
@@ -455,6 +460,8 @@ static OSStatus AVM_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerP
     gEngine = (avm_engine*)calloc(1, sizeof(avm_engine));
     if (gEngine == NULL) return kAudioHardwareUnspecifiedError;
     avm_engine_init(gEngine);
+    avm_persist_init(&gPersistMatrix, &gStateMutex);
+    avm_persist_init(&gPersistMixer, &gStateMutex);
 
     AVM_LoadState();
 
@@ -656,6 +663,19 @@ static OSStatus AVM_GetMatrixProperty(UInt32 inDataSize, UInt32* outDataSize, vo
     return 0;
 }
 
+// Adaptadores para avm_persist_commit.
+static bool AVM_ApplyMatrix(void* obj, const void* v) { avm_engine_set_matrix((avm_engine*)obj, (const avm_matrix*)v); return true; }
+static void AVM_SnapMatrix(void* obj, void* out)
+{
+    // Con gStateMutex tomado (escritores serializados) la lectura acotada siempre
+    // encuentra una copia coherente; si no, se conserva la copia de `out`.
+    avm_engine_try_get_matrix((avm_engine*)obj, (avm_matrix*)out);
+}
+static void AVM_WriteMatrix(const void* snap, void* ctx) { (void)ctx; AVM_StoreMatrix((const avm_matrix*)snap); }
+static bool AVM_ApplyMixer(void* obj, const void* v) { return avm_engine_set_mixer((avm_engine*)obj, (const avm_mixer*)v); }
+static void AVM_SnapMixer(void* obj, void* out) { avm_engine_get_mixer((const avm_engine*)obj, (avm_mixer*)out); }
+static void AVM_WriteMixer(const void* snap, void* ctx) { (void)ctx; AVM_StoreMixer((const avm_mixer*)snap); }
+
 static OSStatus AVM_SetMatrixProperty(UInt32 inDataSize, const void* inData)
 {
     if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
@@ -669,11 +689,8 @@ static OSStatus AVM_SetMatrixProperty(UInt32 inDataSize, const void* inData)
     // Se rechaza completa cualquier matriz con un cruce prohibido (lazo de realimentación).
     if (!avm_matrix_is_valid(&m)) return kAudioHardwareIllegalOperationError;
 
-    pthread_mutex_lock(&gStateMutex);
-    avm_engine_set_matrix(gEngine, &m);
-    pthread_mutex_unlock(&gStateMutex);
-
-    AVM_StoreMatrix(&m);
+    avm_matrix snap = m;
+    avm_persist_commit(&gPersistMatrix, AVM_ApplyMatrix, AVM_SnapMatrix, AVM_WriteMatrix, gEngine, &m, &snap, NULL);
     AVM_NotifyAllDevices(kAVM_PropertyMatrix);
     return 0;
 }
@@ -733,12 +750,9 @@ static OSStatus AVM_SetMixerProperty(UInt32 inDataSize, const void* inData)
     avm_mixer mx;
     if (!avm_mixer_unpack(CFDataGetBytePtr(d), AVM_MIXER_BLOB_SIZE, &mx)) return kAudioHardwareIllegalOperationError;
 
-    pthread_mutex_lock(&gStateMutex);
-    bool ok = avm_engine_set_mixer(gEngine, &mx);
-    pthread_mutex_unlock(&gStateMutex);
-    if (!ok) return kAudioHardwareIllegalOperationError;
-
-    AVM_StoreMixer(&mx);
+    avm_mixer snap = mx;
+    if (!avm_persist_commit(&gPersistMixer, AVM_ApplyMixer, AVM_SnapMixer, AVM_WriteMixer, gEngine, &mx, &snap, NULL))
+        return kAudioHardwareIllegalOperationError;
     AVM_NotifyAllDevices(kAVM_PropertyMixer);
     return 0;
 }
@@ -1386,6 +1400,14 @@ static OSStatus AVM_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID i
         avm_engine_reset(gEngine);
         AVM_UpdateTicksPerFrame_Locked();
         gAnchorHostTime = (Float64)mach_absolute_time();
+    }
+    if (gRate.running[dev] == 1) {
+        // Este dispositivo empieza (o reanuda) su audio mientras los demás pueden
+        // seguir activos: sus canales toman el volumen y el MUTE vigentes desde
+        // la primera muestra, sin rampa y sin reiniciar a los demás. (El motor
+        // también lo hace solo si el primer bloque no es contiguo al anterior.)
+        avm_engine_request_settle_src(gEngine, kDevices[dev].srcGroup);
+        if (kDevices[dev].dstGroup >= 0) avm_engine_request_settle_dst(gEngine, (avm_dst_group)kDevices[dev].dstGroup);
     }
     pthread_mutex_unlock(&gClockMutex);
     return 0;

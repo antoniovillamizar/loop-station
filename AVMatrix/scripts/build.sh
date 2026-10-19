@@ -32,7 +32,7 @@ mkdir -p "$DRV/Contents/MacOS"
 cp Driver/Info.plist "$DRV/Contents/Info.plist"
 clang $ARCHS $CFLAGS -fvisibility=hidden -bundle \
     -o "$DRV/Contents/MacOS/AVMatrix" \
-    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c Driver/src/avm_rate.c \
+    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c Driver/src/avm_rate.c Driver/src/avm_persist.c \
     -framework CoreFoundation -framework CoreAudio
 codesign --force --sign "${AVM_SIGN_IDENTITY:--}" --timestamp=none "$DRV"
 
@@ -83,6 +83,11 @@ clang $CFLAGS -o "$OUT/test_mixer" tests/test_mixer.c Driver/src/avm_core.c
 "$OUT/test_mixer"
 clang $CFLAGS -o "$OUT/test_fader" tests/test_fader.c App/avm_fader.c Driver/src/avm_core.c
 "$OUT/test_fader"
+clang $CFLAGS -o "$OUT/test_persist" tests/test_persist.c Driver/src/avm_persist.c Driver/src/avm_core.c
+"$OUT/test_persist"
+clang $CFLAGS -o "$OUT/test_selftest" tests/test_selftest.c
+"$OUT/test_selftest"
+bash tests/test_avmctl_static.sh
 bash tests/test_install.sh
 bash tests/test_app_strings.sh
 # Prueba nativa del panel de nombres (AppKit): tamaño, mensajes de error y

@@ -29,6 +29,11 @@ test:
 	$(CC) $(CFLAGS) -o $(BUILD)/test_fader tests/test_fader.c App/avm_fader.c Driver/src/avm_core.c -lm
 	./$(BUILD)/test_fader
 	bash tests/compare_engine_unity.sh
+	$(CC) $(CFLAGS) -o $(BUILD)/test_persist tests/test_persist.c Driver/src/avm_persist.c Driver/src/avm_core.c -lm -lpthread
+	./$(BUILD)/test_persist
+	$(CC) $(CFLAGS) -o $(BUILD)/test_selftest tests/test_selftest.c
+	./$(BUILD)/test_selftest
+	bash tests/test_avmctl_static.sh
 	bash tests/test_install.sh
 	bash tests/test_build_script.sh
 	bash tests/test_app_strings.sh
@@ -53,6 +58,10 @@ test-sanitize:
 	./$(BUILD)/test_mixer_asan
 	gcc -std=c11 -O1 -g -fsanitize=thread -o $(BUILD)/test_mixer_tsan tests/test_mixer.c Driver/src/avm_core.c -lm -lpthread
 	./$(BUILD)/test_mixer_tsan
+	gcc -std=c11 -O1 -g -fsanitize=thread -o $(BUILD)/test_persist_tsan tests/test_persist.c Driver/src/avm_persist.c Driver/src/avm_core.c -lm -lpthread
+	./$(BUILD)/test_persist_tsan
+	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_persist_asan tests/test_persist.c Driver/src/avm_persist.c Driver/src/avm_core.c -lm -lpthread
+	./$(BUILD)/test_persist_asan
 	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_fader_asan tests/test_fader.c App/avm_fader.c Driver/src/avm_core.c -lm
 	./$(BUILD)/test_fader_asan
 
@@ -61,7 +70,7 @@ cross:
 	mkdir -p $(BUILD)/cross
 	for a in arm64 x86_64; do \
 	  clang -target $$a-apple-macos$(MINOS) $(XFLAGS) -fvisibility=hidden -bundle -o $(BUILD)/cross/AVMatrix_$$a \
-	    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c Driver/src/avm_rate.c -framework CoreFoundation -framework CoreAudio || exit 1; \
+	    Driver/src/AVMatrixDriver.c Driver/src/avm_core.c Driver/src/avm_rate.c Driver/src/avm_persist.c -framework CoreFoundation -framework CoreAudio || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) $(XFLAGS) -o $(BUILD)/cross/avmctl_$$a \
 	    Client/avmctl.c Client/avm_client.c Driver/src/avm_core.c -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \

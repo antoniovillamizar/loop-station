@@ -13,6 +13,7 @@
 //   avmctl test-all                    la misma prueba en las 3 frecuencias x 4 formatos
 
 #include "avm_client.h"
+#include "avm_selftest.h"
 
 #include <math.h>
 #include <stdatomic.h>
@@ -316,6 +317,35 @@ static float expected_mixer(int dev, int c)
     }
 }
 
+// Fase de arranque escalonado (modo 4): Smaart arranca primero; Música arranca
+// después con L ya en MUTE y R ya a −6 dB; LISTENTO arranca al final con el
+// Envío 1 ya en MUTE y el Envío 2 ya a −6 dB. Cada canal debe respetar el mixer
+// desde la PRIMERA muestra: solo se admite 0 (antes de que llegue su fuente) o
+// el valor exacto; cualquier valor intermedio (una rampa) es un fallo.
+//   smaart.in.7   <- music.L        fuente en MUTE      -> siempre 0
+//   smaart.in.8   <- music.R        fuente a 0,5        -> 0 o kMusicR · 0,5
+//   listento.in.1 <- smaart.out.1   destino en MUTE     -> siempre 0
+//   listento.in.2 <- smaart.out.2   destino a 0,5       -> 0 o val_smaart(1) · 0,5
+static void start_phase(avm_matrix* m, avm_mixer* mx)
+{
+    avm_matrix_clear(m);
+    m->cell[AVM_DST_SMAART_BASE + 6][AVM_SRC_MUSIC_BASE + 0] = 1;
+    m->cell[AVM_DST_SMAART_BASE + 7][AVM_SRC_MUSIC_BASE + 1] = 1;
+    m->cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
+    m->cell[AVM_DST_LINK_BASE + 1][AVM_SRC_SMAART_BASE + 1] = 1;
+    avm_mixer_default(mx);
+    mx->src_mute[AVM_SRC_MUSIC_BASE + 0] = 1;
+    mx->src_gain[AVM_SRC_MUSIC_BASE + 1] = 0.5f;
+    mx->dst_mute[AVM_DST_LINK_BASE + 0] = 1;
+    mx->dst_gain[AVM_DST_LINK_BASE + 1] = 0.5f;
+}
+
+static float expected_start(int dev, int c)
+{
+    if (dev == T_SMAART) return c == 7 ? kMusicR * 0.5f : 0.0f;
+    return c == 1 ? val_smaart(1) * 0.5f : 0.0f;
+}
+
 static float expected_in(int dev, int c)
 {
     if (dev == T_LINK) return val_smaart(c);           // smaart.out.N -> listento.in.N
@@ -336,6 +366,17 @@ static void classify_input(int dev, const AudioBufferList* in, const AudioTimeSt
     if (g_t.first_in[dev] < 0) g_t.first_in[dev] = t->mSampleTime;
     int di = dev == T_LINK ? 1 : 0;
 
+    if (g_t.mode == 4) {
+        // Sin calentamiento: se mira desde la primera muestra recibida.
+        for (UInt32 f = 0; f < frames; f++)
+            for (UInt32 c = 0; c < nch && c < 8; c++) {
+                float v = p[f * nch + c], e = expected_start(dev, (int)c);
+                if (v == e) atomic_fetch_add(&g_t.correct[di][c], 1);
+                else if (v == 0.0f) atomic_fetch_add(&g_t.silent[di][c], 1);   // su fuente aún no ha llegado
+                else atomic_fetch_add(&g_t.wrong[di][c], 1);                   // valor intermedio: rampa o fuga
+            }
+        return;
+    }
     if (g_t.mode == 0 || g_t.mode == 3) {
         if (t->mSampleTime < g_t.first_in[dev] + 1.5 * g_t.rate) return;  // calentamiento
         for (UInt32 f = 0; f < frames; f++)
@@ -365,7 +406,7 @@ static void fill_output(int dev, AudioBufferList* out, const AudioTimeStamp* t)
     UInt32 frames = out->mBuffers[0].mDataByteSize / (sizeof(float) * (nch ? nch : 1));
     memset(p, 0, out->mBuffers[0].mDataByteSize);
 
-    if (g_t.mode == 0 || g_t.mode == 3) {
+    if (g_t.mode == 0 || g_t.mode == 3 || g_t.mode == 4) {
         for (UInt32 f = 0; f < frames; f++)
             for (UInt32 c = 0; c < nch; c++)
                 p[f * nch + c] = dev == T_SMAART ? val_smaart((int)c)
@@ -414,6 +455,42 @@ static int run_devices(double seconds, void (*during)(void))
     }
     if (ok) usleep((useconds_t)(seconds * 1e6));
     if (ok && during) during();
+    for (int i = 0; i < 3; i++) {
+        if (ids[i]) {
+            AudioDeviceStop(devs[i], ids[i]);
+            AudioDeviceDestroyIOProcID(devs[i], ids[i]);
+        }
+    }
+    return ok;
+}
+
+// Arranca Smaart, después Música y después LISTENTO, con `gap` segundos entre
+// cada uno, mientras los anteriores siguen activos; los detiene a los `total`.
+// `mixer_after_first` se aplica con Smaart ya en marcha (como en la prueba de
+// Codex): así el arranque global no puede haber dejado ya los niveles puestos.
+static int run_devices_staggered(double gap, double total, const avm_mixer* mixer_after_first)
+{
+    AudioObjectID devs[3] = { avm_find_device(AVM_DEV_SMAART), avm_find_device(AVM_DEV_LISTENTO), avm_find_device(AVM_DEV_MUSIC) };
+    const int order[3] = { T_SMAART, T_MUSIC, T_LINK };
+    AudioDeviceIOProcID ids[3] = { 0 };
+    int ok = 1;
+    for (int i = 0; i < 3; i++) {
+        OSStatus err = AudioDeviceCreateIOProcID(devs[i], io_proc, (void*)(intptr_t)i, &ids[i]);
+        if (err) { print_err("crear IOProc", err); ok = 0; break; }
+    }
+    double waited = 0;
+    for (int k = 0; ok && k < 3; k++) {
+        int i = order[k];
+        OSStatus err = AudioDeviceStart(devs[i], ids[i]);
+        if (err) { print_err("arrancar dispositivo", err); ok = 0; break; }
+        if (k == 0 && mixer_after_first) {
+            usleep(200000); waited += 0.2;
+            OSStatus merr = avm_set_mixer(mixer_after_first);
+            if (merr) { print_err("escribir mixer de prueba", merr); ok = 0; break; }
+        }
+        if (k < 2) { usleep((useconds_t)(gap * 1e6)); waited += gap; }
+    }
+    if (ok && total > waited) usleep((useconds_t)((total - waited) * 1e6));
     for (int i = 0; i < 3; i++) {
         if (ids[i]) {
             AudioDeviceStop(devs[i], ids[i]);
@@ -610,6 +687,27 @@ static int run_test_once(int verbose)
         }
     meters_after_stop(verbose);
     if (!g_meter_pass) pass = 0;
+
+    // 2d) Arranque escalonado con canales ya silenciados o atenuados: Música y
+    // LISTENTO arrancan mientras Smaart sigue activo; el mixer se respeta desde
+    // la primera muestra (sin rampa al arrancar).
+    start_phase(&m, &mx);
+    if ((err = avm_set_matrix(&m))) { print_err("escribir matriz de prueba", err); avm_set_mixer(&unity); return 0; }
+    if ((err = avm_set_mixer(&unity))) { print_err("poner el mixer a 0 dB", err); return 0; }
+    reset_ctx(4, rate);
+    if (!run_devices_staggered(0.5, 2.7, &mx)) { avm_set_mixer(&unity); return 0; }
+    const struct { int di, c; const char* what; } sc[4] = {
+        { 0, 6, "Smaart entrada 7 <- Música L (MUTE antes de arrancar Música)" },
+        { 0, 7, "Smaart entrada 8 <- Música R (−6 dB antes de arrancar Música)" },
+        { 1, 0, "LISTENTO envío 1 (MUTE antes de arrancar LISTENTO)" },
+        { 1, 1, "LISTENTO envío 2 (−6 dB antes de arrancar LISTENTO)" } };
+    for (int k = 0; k < 4; k++) {
+        long ok = atomic_load(&g_t.correct[sc[k].di][sc[k].c]), w = atomic_load(&g_t.wrong[sc[k].di][sc[k].c]);
+        int good = ok > 0 && w == 0;
+        if (!good) pass = 0;
+        if (verbose || !good)
+            printf("  %-6s arranque: %s: %ld exactas, %ld con otro valor\n", good ? "OK" : "FALLO", sc[k].what, ok, w);
+    }
     if ((merr = avm_set_mixer(&unity))) { print_err("poner el mixer a 0 dB", merr); pass = 0; }
 
     // 3) Retardo de transporte con un impulso (informativo; no es un objetivo de latencia).
@@ -670,23 +768,30 @@ static int cmd_test(int all)
         }
     }
 
-    // Restaurar el estado del usuario.
-    avm_set_sample_rate(saved_rate);
-    wait_for_rate(saved_rate);
+    // Restaurar el estado del usuario. Cualquier fallo al restaurar hace que la
+    // autoprueba termine con FALLO (avm_selftest.h), aunque el audio pasara.
+    avm_selftest_outcome out = { total_pass != 0, true, true, true, true };
+    OSStatus rerr = avm_set_sample_rate(saved_rate);
+    if (rerr || !wait_for_rate(saved_rate)) {
+        if (rerr) print_err("restaurar frecuencia", rerr); else printf("FALLO  la frecuencia no volvió a %.0f Hz\n", saved_rate);
+        out.rate_restored = false;
+    }
     int fs[5] = { avm_format_from_asbd(&f_s_in), avm_format_from_asbd(&f_s_out), avm_format_from_asbd(&f_l_in),
                   avm_format_from_asbd(&f_l_out), avm_format_from_asbd(&f_m_out) };
-    if (fs[0] >= 0) avm_set_physical_format(AVM_DEV_SMAART, true, (avm_format)fs[0]);
-    if (fs[1] >= 0) avm_set_physical_format(AVM_DEV_SMAART, false, (avm_format)fs[1]);
-    if (fs[2] >= 0) avm_set_physical_format(AVM_DEV_LISTENTO, true, (avm_format)fs[2]);
-    if (fs[3] >= 0) avm_set_physical_format(AVM_DEV_LISTENTO, false, (avm_format)fs[3]);
-    if (fs[4] >= 0) avm_set_physical_format(AVM_DEV_MUSIC, false, (avm_format)fs[4]);
+    const avm_device_kind fk[5] = { AVM_DEV_SMAART, AVM_DEV_SMAART, AVM_DEV_LISTENTO, AVM_DEV_LISTENTO, AVM_DEV_MUSIC };
+    const bool fin[5] = { true, false, true, false, false };
+    for (int i = 0; i < 5; i++) {
+        if (fs[i] < 0) continue;
+        OSStatus ferr = avm_set_physical_format(fk[i], fin[i], (avm_format)fs[i]);
+        if (ferr) { print_err("restaurar formato", ferr); out.formats_restored = false; }
+    }
     OSStatus merr = avm_set_mixer(&saved_mixer);
-    if (merr) print_err("restaurar mixer", merr);
-    if ((err = avm_set_matrix(&saved))) print_err("restaurar matriz", err);
-    else if (!merr) printf("Matriz, mixer, frecuencia y formatos restaurados.\n");
+    if (merr) { print_err("restaurar mixer", merr); out.mixer_restored = false; }
+    if ((err = avm_set_matrix(&saved))) { print_err("restaurar matriz", err); out.matrix_restored = false; }
+    if (avm_selftest_restored(&out)) printf("Matriz, mixer, frecuencia y formatos restaurados.\n");
 
-    printf("RESULTADO: %s\n", total_pass ? "CORRECTO" : "HAY FALLOS");
-    return total_pass ? 0 : 1;
+    printf("RESULTADO: %s\n", avm_selftest_verdict(&out));
+    return avm_selftest_exit_code(&out);
 }
 
 // ---------------------------------------------------------------------------

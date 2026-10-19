@@ -144,6 +144,11 @@ typedef struct {
 // rampa lineal de AVM_GAIN_RAMP_FRAMES muestras (≈ 10,7 ms a 48 kHz). La rampa
 // avanza muestra a muestra dentro del bloque que ya se está procesando: no
 // añade retardo de transporte.
+// La rampa solo se usa con el audio en marcha. Cuando un grupo empieza o
+// reanuda su audio (primer bloque, bloque no contiguo al anterior o arranque
+// pedido con avm_engine_request_settle_*), sus canales toman el volumen y el
+// MUTE vigentes desde la primera muestra: un canal silenciado nunca deja pasar
+// audio al arrancar.
 #define AVM_GAIN_RAMP_FRAMES 512u
 
 // Estado de la ganancia de un canal. `target` lo escribe el hilo de control
@@ -186,6 +191,16 @@ typedef struct {
 
     avm_gain            src_gain[AVM_NUM_SOURCES];
     avm_gain            dst_gain[AVM_NUM_DESTS];
+    // Continuidad del audio de cada grupo (solo el hilo de IO dueño del grupo):
+    // instante esperado del siguiente bloque y si el grupo ya procesó alguno.
+    int64_t             src_next[AVM_SRC_GROUP_COUNT];
+    int64_t             dst_next[AVM_DST_GROUP_COUNT];
+    bool                src_flowing[AVM_SRC_GROUP_COUNT];
+    bool                dst_flowing[AVM_DST_GROUP_COUNT];
+    // Arranque pedido por el driver (StartIO): el hilo de IO lo consume con un
+    // intercambio atómico al empezar su siguiente bloque.
+    _Atomic uint32_t    src_settle_req[AVM_SRC_GROUP_COUNT];
+    _Atomic uint32_t    dst_settle_req[AVM_DST_GROUP_COUNT];
     // Copia de los ajustes del mixer (con las ganancias de los canales en mute).
     // Solo la usa el hilo de control, serializado por el llamador.
     avm_mixer           mixer;
@@ -257,6 +272,12 @@ bool avm_engine_try_get_matrix(avm_engine* e, avm_matrix* out);
 // Los llamadores deben estar serializados (hilo de control).
 bool avm_engine_set_mixer(avm_engine* e, const avm_mixer* mx);
 void avm_engine_get_mixer(const avm_engine* e, avm_mixer* out);
+// Arranque de un dispositivo: su próximo bloque de escritura (fuentes) o de
+// lectura (destinos) empieza con el volumen y el MUTE vigentes, sin rampa.
+// Seguro desde cualquier hilo (un almacenamiento atómico); no toca a los
+// demás grupos ni detiene el audio que ya está en marcha.
+void avm_engine_request_settle_src(avm_engine* e, avm_src_group g);
+void avm_engine_request_settle_dst(avm_engine* e, avm_dst_group g);
 
 // Variantes con medición: now_ns es la hora monotónica en nanosegundos (> 0).
 // Hacen exactamente lo mismo que avm_engine_write/avm_engine_read y además

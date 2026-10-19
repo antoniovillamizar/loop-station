@@ -516,6 +516,167 @@ static void test_concurrency(void)
     free(x.e);
 }
 
+// --- Arranque y reanudación (revisión 13) -------------------------------------
+// Caso de Codex: Smaart sigue activo; Música ya está en MUTE (o atenuada) antes
+// de abrir su audio. Desde la primera muestra de Música debe respetarse, sin
+// reiniciar Smaart. Lo mismo al empezar a leer un destino ya silenciado.
+
+static void write_group(avm_engine* e, avm_src_group g, int64_t t, float v)
+{
+    int nch = avm_src_group_channels(g);
+    float buf[BLOCK * 8];
+    for (int i = 0; i < BLOCK * nch; i++) buf[i] = v;
+    avm_engine_write(e, g, t, BLOCK, buf, AVM_FMT_FLOAT32, (uint32_t)nch);
+}
+
+// Lee LISTENTO y devuelve el valor de la primera muestra del canal c y si todo el bloque vale `want`.
+static int read_link_all(avm_engine* e, int64_t t, int c, float want, float* first)
+{
+    float out[BLOCK * 8];
+    avm_engine_read(e, AVM_DST_GROUP_LINK, t, BLOCK, out, AVM_FMT_FLOAT32, 8);
+    *first = out[c];
+    for (int f = 0; f < BLOCK; f++) if (out[f * 8 + c] != want) return 0;
+    return 1;
+}
+
+static void test_start_respects_mixer(void)
+{
+    avm_matrix m; avm_matrix_clear(&m);
+    m.cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;   // Smaart Salida 1 -> Envío 1
+    m.cell[AVM_DST_LINK_BASE + 1][AVM_SRC_MUSIC_BASE + 0] = 1;    // Música L -> Envío 2
+    m.cell[AVM_DST_LINK_BASE + 2][AVM_SRC_MUSIC_BASE + 1] = 1;    // Música R -> Envío 3
+    avm_engine* e = new_engine();
+    avm_engine_set_matrix(e, &m);
+    avm_engine_reset(e);   // arranque global (Smaart)
+    int64_t t = 0;
+    float first;
+    // Smaart en marcha (y LISTENTO leyendo) varios bloques.
+    for (int b = 0; b < 6; b++) { write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f); read_link_all(e, t, 0, 1.0f, &first); t += BLOCK; }
+
+    // Con el audio en marcha: Música L en MUTE y Música R a −6 dB, ANTES de abrir Música.
+    avm_mixer mx; avm_mixer_default(&mx);
+    mx.src_mute[AVM_SRC_MUSIC_BASE] = 1;
+    mx.src_gain[AVM_SRC_MUSIC_BASE + 1] = 0.5f;
+    avm_engine_set_mixer(e, &mx);
+    write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f);
+    write_group(e, AVM_SRC_GROUP_MUSIC, t, 1.0f);     // primer bloque de Música
+    float out[BLOCK * 8];
+    avm_engine_read(e, AVM_DST_GROUP_LINK, t, BLOCK, out, AVM_FMT_FLOAT32, 8);
+    int muted = 1, half = 1, smaart = 1;
+    for (int f = 0; f < BLOCK; f++) {
+        if (out[f * 8 + 1] != 0.0f) muted = 0;
+        if (out[f * 8 + 2] != 0.5f) half = 0;
+        if (out[f * 8 + 0] != 1.0f) smaart = 0;
+    }
+    CHECK(muted, "Música en MUTE antes de abrir su audio: silencio desde la primera muestra (primera = %g)", (double)out[1]);
+    CHECK(half, "Música a −6 dB antes de abrir su audio: 0,5 desde la primera muestra (primera = %g)", (double)out[2]);
+    CHECK(smaart, "Smaart sigue igual mientras arranca Música (sin reinicio)");
+    t += BLOCK;
+
+    // Reanudación: Música se detiene, se quita el MUTE y se baja el R a silencio
+    // con Música parada, y vuelve a sonar: nuevo nivel desde la primera muestra.
+    for (int b = 0; b < 3; b++) { write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f); read_link_all(e, t, 0, 1.0f, &first); t += BLOCK; }
+    mx.src_mute[AVM_SRC_MUSIC_BASE] = 0;
+    mx.src_gain[AVM_SRC_MUSIC_BASE + 1] = 0.0f;
+    avm_engine_set_mixer(e, &mx);
+    write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f);
+    write_group(e, AVM_SRC_GROUP_MUSIC, t, 1.0f);     // reanuda (no contiguo)
+    avm_engine_read(e, AVM_DST_GROUP_LINK, t, BLOCK, out, AVM_FMT_FLOAT32, 8);
+    int unmuted = 1, silent = 1;
+    for (int f = 0; f < BLOCK; f++) { if (out[f * 8 + 1] != 1.0f) unmuted = 0; if (out[f * 8 + 2] != 0.0f) silent = 0; }
+    CHECK(unmuted, "al reanudar sin MUTE: 0 dB desde la primera muestra");
+    CHECK(silent, "al reanudar con el fader en silencio: silencio desde la primera muestra (primera = %g)", (double)out[2]);
+    t += BLOCK;
+
+    // Con el audio de Música en marcha, un cambio SÍ usa la rampa (sin chasquidos).
+    mx.src_mute[AVM_SRC_MUSIC_BASE] = 1;
+    avm_engine_set_mixer(e, &mx);
+    write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f);
+    write_group(e, AVM_SRC_GROUP_MUSIC, t, 1.0f);     // contiguo
+    avm_engine_read(e, AVM_DST_GROUP_LINK, t, BLOCK, out, AVM_FMT_FLOAT32, 8);
+    CHECK(out[1] > 0.99f && out[1] < 1.0f && out[(BLOCK - 1) * 8 + 1] > 0.0f, "con el audio en marcha, el MUTE sigue usando la rampa (%g)", (double)out[1]);
+    free(e);
+}
+
+static void test_dest_start_respects_mixer(void)
+{
+    avm_matrix m; avm_matrix_clear(&m);
+    m.cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
+    m.cell[AVM_DST_LINK_BASE + 1][AVM_SRC_SMAART_BASE + 1] = 1;
+    m.cell[AVM_DST_SMAART_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
+    avm_engine* e = new_engine();
+    avm_engine_set_matrix(e, &m);
+    avm_engine_reset(e);
+    int64_t t = 0;
+    float sm_out[BLOCK * 8], out[BLOCK * 8];
+    // Solo Smaart en marcha (escribe y lee); LISTENTO todavía no lee.
+    for (int b = 0; b < 6; b++) {
+        write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f);
+        avm_engine_read(e, AVM_DST_GROUP_SMAART, t, BLOCK, sm_out, AVM_FMT_FLOAT32, 8);
+        t += BLOCK;
+    }
+    avm_mixer mx; avm_mixer_default(&mx);
+    mx.dst_mute[AVM_DST_LINK_BASE + 0] = 1;          // Envío 1 en MUTE antes de que LISTENTO lea
+    mx.dst_gain[AVM_DST_LINK_BASE + 1] = 0.25f;      // Envío 2 a −12 dB
+    avm_engine_set_mixer(e, &mx);
+    write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f);
+    avm_engine_read(e, AVM_DST_GROUP_SMAART, t, BLOCK, sm_out, AVM_FMT_FLOAT32, 8);
+    avm_engine_read(e, AVM_DST_GROUP_LINK, t, BLOCK, out, AVM_FMT_FLOAT32, 8);   // primera lectura de LISTENTO
+    int muted = 1, quarter = 1, smaart = 1;
+    for (int f = 0; f < BLOCK; f++) {
+        if (out[f * 8 + 0] != 0.0f) muted = 0;
+        if (out[f * 8 + 1] != 0.25f) quarter = 0;
+        if (sm_out[f * 8 + 0] != 1.0f) smaart = 0;
+    }
+    CHECK(muted, "destino LISTENTO ya en MUTE: silencio desde la primera muestra leída (primera = %g)", (double)out[0]);
+    CHECK(quarter, "destino LISTENTO ya atenuado: −12 dB desde la primera muestra (primera = %g)", (double)out[1]);
+    CHECK(smaart, "Smaart Entrada 1 sigue igual");
+    t += BLOCK;
+
+    // LISTENTO deja de leer, se quita el MUTE, y vuelve a leer: 0 dB desde el principio.
+    for (int b = 0; b < 2; b++) { write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f); t += BLOCK; }
+    mx.dst_mute[AVM_DST_LINK_BASE + 0] = 0;
+    avm_engine_set_mixer(e, &mx);
+    write_group(e, AVM_SRC_GROUP_SMAART, t, 1.0f);
+    float first;
+    CHECK(read_link_all(e, t, 0, 1.0f, &first), "lectura reanudada sin MUTE: 0 dB desde la primera muestra (primera = %g)", (double)first);
+    free(e);
+}
+
+// Arranque pedido por el driver (StartIO) aunque el primer bloque sea contiguo.
+static void test_requested_settle(void)
+{
+    avm_matrix m; avm_matrix_clear(&m);
+    m.cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
+    avm_engine* e = new_engine();
+    avm_engine_set_matrix(e, &m);
+    avm_engine_reset(e);
+    float first;
+    write_group(e, AVM_SRC_GROUP_SMAART, 0, 1.0f);
+    read_link_all(e, 0, 0, 1.0f, &first);
+    avm_mixer mx; avm_mixer_default(&mx);
+    mx.src_mute[0] = 1;
+    avm_engine_set_mixer(e, &mx);
+    avm_engine_request_settle_src(e, AVM_SRC_GROUP_SMAART);
+    write_group(e, AVM_SRC_GROUP_SMAART, BLOCK, 1.0f);   // contiguo, pero arranque pedido
+    CHECK(read_link_all(e, BLOCK, 0, 0.0f, &first), "arranque pedido por StartIO: MUTE desde la primera muestra (primera = %g)", (double)first);
+    // Sin petición, un bloque contiguo sigue usando la rampa.
+    mx.src_mute[0] = 0;
+    avm_engine_set_mixer(e, &mx);
+    write_group(e, AVM_SRC_GROUP_SMAART, 2 * BLOCK, 1.0f);
+    read_link_all(e, 2 * BLOCK, 0, 1.0f, &first);
+    CHECK(first > 0.0f && first < 0.01f, "sin petición y contiguo: rampa (primera muestra %g)", (double)first);
+    // La petición de un grupo no afecta a los demás.
+    avm_engine_request_settle_src(e, AVM_SRC_GROUP_MUSIC);
+    avm_engine_request_settle_dst(e, AVM_DST_GROUP_SMAART);
+    CHECK(atomic_load(&e->src_settle_req[AVM_SRC_GROUP_SMAART]) == 0 && atomic_load(&e->src_settle_req[AVM_SRC_GROUP_MUSIC]) == 1,
+          "la petición es por grupo");
+    avm_engine_request_settle_src(e, (avm_src_group)7);   // fuera de rango: sin efecto
+    avm_engine_request_settle_dst(e, (avm_dst_group)-1);
+    CHECK(1, "petición fuera de rango ignorada");
+    free(e);
+}
+
 int main(void)
 {
     test_defaults_and_validity();
@@ -529,6 +690,9 @@ int main(void)
     test_no_gain_no_delay();
     test_clip_after_gain();
     test_concurrency();
+    test_start_respects_mixer();
+    test_dest_start_respects_mixer();
+    test_requested_settle();
     printf("Mixer: %d comprobaciones correctas, %d fallos\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

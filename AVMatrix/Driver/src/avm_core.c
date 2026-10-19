@@ -541,6 +541,14 @@ void avm_engine_init(avm_engine* e)
     avm_mixer_default(&e->mixer);
     for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_gain_init(&e->src_gain[i], 1.0f);
     for (int i = 0; i < AVM_NUM_DESTS; i++) avm_gain_init(&e->dst_gain[i], 1.0f);
+    for (int g = 0; g < AVM_SRC_GROUP_COUNT; g++) {
+        e->src_next[g] = 0; e->src_flowing[g] = false;
+        atomic_init(&e->src_settle_req[g], 0);
+    }
+    for (int g = 0; g < AVM_DST_GROUP_COUNT; g++) {
+        e->dst_next[g] = 0; e->dst_flowing[g] = false;
+        atomic_init(&e->dst_settle_req[g], 0);
+    }
 }
 
 void avm_engine_reset(avm_engine* e)
@@ -562,6 +570,35 @@ void avm_engine_reset(avm_engine* e)
 
     for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_gain_settle(&e->src_gain[i]);
     for (int i = 0; i < AVM_NUM_DESTS; i++) avm_gain_settle(&e->dst_gain[i]);
+    for (int g = 0; g < AVM_SRC_GROUP_COUNT; g++) e->src_flowing[g] = false;
+    for (int g = 0; g < AVM_DST_GROUP_COUNT; g++) e->dst_flowing[g] = false;
+}
+
+void avm_engine_request_settle_src(avm_engine* e, avm_src_group g)
+{
+    if ((int)g >= 0 && g < AVM_SRC_GROUP_COUNT)
+        atomic_store_explicit(&e->src_settle_req[g], 1, memory_order_release);
+}
+
+void avm_engine_request_settle_dst(avm_engine* e, avm_dst_group g)
+{
+    if ((int)g >= 0 && g < AVM_DST_GROUP_COUNT)
+        atomic_store_explicit(&e->dst_settle_req[g], 1, memory_order_release);
+}
+
+// Al principio de cada bloque, en el hilo de IO dueño del grupo: si el audio
+// del grupo empieza o se reanuda (sin bloques previos, bloque no contiguo o
+// arranque pedido), sus canales toman la ganancia vigente sin rampa. Con el
+// audio en marcha y contiguo, las rampas continúan.
+static void avm_group_begin(avm_gain* gains, int nch, int64_t* next, bool* flowing,
+                            _Atomic uint32_t* req, int64_t sample_time, uint32_t frames)
+{
+    bool requested = atomic_exchange_explicit(req, 0, memory_order_acquire) != 0;
+    if (requested || !*flowing || sample_time != *next)
+        for (int c = 0; c < nch; c++) avm_gain_settle(&gains[c]);
+    for (int c = 0; c < nch; c++) avm_gain_begin_block(&gains[c]);
+    *flowing = true;
+    *next = sample_time + (int64_t)frames;
 }
 
 bool avm_engine_set_mixer(avm_engine* e, const avm_mixer* mx)
@@ -649,7 +686,7 @@ void avm_engine_write_metered(avm_engine* e, avm_src_group g, int64_t sample_tim
     // Volumen de entrada del mixer (antes de la matriz). Este hilo es el único
     // escritor del grupo: es el dueño de la rampa de sus canales.
     avm_gain* gains = &e->src_gain[base];
-    for (int c = 0; c < nch; c++) avm_gain_begin_block(&gains[c]);
+    avm_group_begin(gains, nch, &e->src_next[g], &e->src_flowing[g], &e->src_settle_req[g], sample_time, frames);
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
         float gf[AVM_CHANNELS_PER_PORT];
@@ -731,7 +768,7 @@ bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time
     // Volumen de salida del mixer (después del enrutamiento y la suma). Este
     // hilo es el único lector del grupo: es el dueño de la rampa de sus canales.
     avm_gain* gains = &e->dst_gain[dbase];
-    for (int d = 0; d < dnch; d++) avm_gain_begin_block(&gains[d]);
+    avm_group_begin(gains, dnch, &e->dst_next[g], &e->dst_flowing[g], &e->dst_settle_req[g], sample_time, frames);
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
         int64_t idx = t & AVM_RING_MASK;
