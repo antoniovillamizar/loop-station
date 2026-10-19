@@ -20,6 +20,7 @@ test:
 	./$(BUILD)/test_rate
 	bash tests/test_install.sh
 	bash tests/test_build_script.sh
+	bash tests/test_app_strings.sh
 
 test-sanitize:
 	mkdir -p $(BUILD)

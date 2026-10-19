@@ -58,6 +58,7 @@ clang $CFLAGS -o "$OUT/test_core" tests/test_core.c Driver/src/avm_core.c
 clang $CFLAGS -o "$OUT/test_rate" tests/test_rate.c Driver/src/avm_rate.c
 "$OUT/test_rate"
 bash tests/test_install.sh
+bash tests/test_app_strings.sh
 
 echo "== Verificación =="
 lipo -info "$DRV/Contents/MacOS/AVMatrix"

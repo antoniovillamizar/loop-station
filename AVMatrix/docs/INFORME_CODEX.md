@@ -1,8 +1,28 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 y 3; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2, 3 y 4; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 3 — matriz tipo Dante y referencia local (sobre `0e7c9e8`)
+## 0. Revisión 4 — textos UTF-8 en la app (sobre `de78154`)
+
+Codex comprobó `de78154` en el Mac (compilación, pruebas y matriz nativa) y detectó que «Música» se mostraba como «M√∫sica».
+
+- **Causa:** `stringWithFormat:` con `%s` interpreta los textos C con la codificación del sistema, no como UTF-8.
+- **Corrección (`App/AVMatrixApp.m`):** nuevo `UTF8(const char*)`, que usa `stringWithUTF8String:` y devuelve `@""` si recibe NULL. Los cinco usos de `%s` pasan a `%@ + UTF8(...)`:
+  - cabeceras de grupo de transmisores y receptores;
+  - mensajes «Receptor …» y «Transmisor …: clic para plegar/desplegar»;
+  - estado «falta <dispositivo>».
+  - `SourceLongName` y `DestLongName` también usan `UTF8()`.
+- **Alcance:** solo cambian los textos. Las rutas, la matriz y las demás funciones no cambian. El driver ya usaba `kCFStringEncodingUTF8` y `avmctl` escribe UTF-8 en la Terminal.
+- **Prueba nueva `tests/test_app_strings.sh`** (en `make test` y en `build.sh`):
+  - no queda ningún `%s` en cadenas de formato de la app;
+  - todo `kTxGroups/kRxGroups[...].name` y `avm_device_label(...)` pasa por `UTF8()`;
+  - `UTF8()` usa `stringWithUTF8String:`;
+  - las fuentes son UTF-8 válido (`iconv`).
+  - Pasa con 8/8. **Con el `AVMatrixApp.m` de `de78154` falla** en 4 comprobaciones y señala las 5 líneas.
+- **Resto:** núcleo 122/122, frecuencia 115/115, instalador 57/57, `build.sh` 7/7; sanitizers sin avisos; compilación cruzada sin avisos.
+- **Pendiente en el Mac:** ver en pantalla «⊟ Música», «Transmisor Música: clic para plegar» y el estado «falta AV Matrix Música» si faltara ese dispositivo.
+
+## 0quater. Revisión 3 — matriz tipo Dante y referencia local (sobre `0e7c9e8`)
 
 Petición de Antonio: organizar la matriz como Dante Controller / Dante Preset Creator, con la Entrada 8 como **REFERENCIA LOCAL**. Se conservan el controlador y todas las funciones. Antes de modificar se hizo una copia de seguridad del proyecto en `0e7c9e8`. **No se instaló nada ni se reinició coreaudiod.**
 

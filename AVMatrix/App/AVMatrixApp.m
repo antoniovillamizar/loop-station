@@ -50,8 +50,17 @@ static NSString* RxChannelName(int dst)
     return [NSString stringWithFormat:@"Envío %d", dst - AVM_DST_LINK_BASE + 1];
 }
 
-static NSString* SourceLongName(int s) { char b[64]; avm_source_name(s, b, sizeof(b)); return [NSString stringWithUTF8String:b]; }
-static NSString* DestLongName(int d)   { char b[64]; avm_dest_name(d, b, sizeof(b));   return [NSString stringWithUTF8String:b]; }
+// Convierte un texto C en UTF-8 (nombres de grupos y dispositivos con tildes,
+// p. ej. «Música») a NSString. Nunca usar %s con estos nombres: %s los
+// interpreta con la codificación del sistema y muestra «M√∫sica».
+static NSString* UTF8(const char* s)
+{
+    NSString* r = s ? [NSString stringWithUTF8String:s] : nil;
+    return r ?: @"";
+}
+
+static NSString* SourceLongName(int s) { char b[64]; avm_source_name(s, b, sizeof(b)); return UTF8(b); }
+static NSString* DestLongName(int d)   { char b[64]; avm_dest_name(d, b, sizeof(b));   return UTF8(b); }
 
 // Un carril es una fila o columna visible: la cabecera de un grupo o uno de sus canales.
 typedef struct {
@@ -258,7 +267,7 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
         NSString* label;
         NSDictionary* attr;
         if (c.channel < 0) {
-            label = [NSString stringWithFormat:@"%@ %s", _txOpen[c.group] ? @"⊟" : @"⊞", kTxGroups[c.group].name];
+            label = [NSString stringWithFormat:@"%@ %@", _txOpen[c.group] ? @"⊟" : @"⊞", UTF8(kTxGroups[c.group].name)];
             attr = groupAttr;
         } else {
             label = TxChannelName(c.channel);
@@ -272,7 +281,7 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
         AVMLane r = _rows[ri];
         CGFloat y = kTopH + ri * kCell + 2;
         if (r.channel < 0) {
-            NSString* label = [NSString stringWithFormat:@"%@ %s", _rxOpen[r.group] ? @"⊟" : @"⊞", kRxGroups[r.group].name];
+            NSString* label = [NSString stringWithFormat:@"%@ %@", _rxOpen[r.group] ? @"⊟" : @"⊞", UTF8(kRxGroups[r.group].name)];
             [label drawAtPoint:NSMakePoint(6, y) withAttributes:groupAttr];
         } else {
             [RxChannelName(r.channel) drawAtPoint:NSMakePoint(24, y + 1) withAttributes:chanAttr];
@@ -378,11 +387,11 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
     }
     if (ri >= 0) {
         AVMLane r = _rows[ri];
-        if (r.channel < 0) return [NSString stringWithFormat:@"Receptor %s: clic para %@", kRxGroups[r.group].name, _rxOpen[r.group] ? @"plegar" : @"desplegar"];
+        if (r.channel < 0) return [NSString stringWithFormat:@"Receptor %@: clic para %@", UTF8(kRxGroups[r.group].name), _rxOpen[r.group] ? @"plegar" : @"desplegar"];
         return DestLongName(r.channel);
     }
     AVMLane c = _cols[ci];
-    if (c.channel < 0) return [NSString stringWithFormat:@"Transmisor %s: clic para %@", kTxGroups[c.group].name, _txOpen[c.group] ? @"plegar" : @"desplegar"];
+    if (c.channel < 0) return [NSString stringWithFormat:@"Transmisor %@: clic para %@", UTF8(kTxGroups[c.group].name), _txOpen[c.group] ? @"plegar" : @"desplegar"];
     return SourceLongName(c.channel);
 }
 
@@ -629,7 +638,7 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     NSMutableArray* parts = [NSMutableArray array];
     for (int k = 0; k < AVM_DEV_COUNT; k++)
         if (avm_find_device((avm_device_kind)k) == kAudioObjectUnknown)
-            [parts addObject:[NSString stringWithFormat:@"falta %s", avm_device_label((avm_device_kind)k)]];
+            [parts addObject:[NSString stringWithFormat:@"falta %@", UTF8(avm_device_label((avm_device_kind)k))]];
     int health = AVM_RATE_HEALTH_OK;
     avm_get_rate_health(&health);
     self.recoverButton.hidden = health != AVM_RATE_HEALTH_INCONSISTENT;
