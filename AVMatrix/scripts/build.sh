@@ -48,7 +48,7 @@ mkdir -p "$APP/Contents/MacOS"
 cp App/Info.plist "$APP/Contents/Info.plist"
 clang $ARCHS -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
     -o "$APP/Contents/MacOS/AVMatrix" \
-    App/AVMatrixApp.m Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
+    App/AVMatrixApp.m App/avm_manual.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
     -framework Cocoa -framework CoreAudio -framework CoreFoundation
 # Icono personalizado (antes de firmar: queda sellado en la firma del bundle).
 set +e
@@ -77,15 +77,22 @@ clang $CFLAGS -o "$OUT/test_meters" tests/test_meters.c Driver/src/avm_core.c
 "$OUT/test_meters"
 clang $CFLAGS -o "$OUT/test_names" tests/test_names.c Client/avm_names.c
 "$OUT/test_names"
+clang $CFLAGS -o "$OUT/test_manual" tests/test_manual.c App/avm_manual.c
+"$OUT/test_manual"
 bash tests/test_install.sh
 bash tests/test_app_strings.sh
 # Prueba nativa del panel de nombres (AppKit): tamaño, mensajes de error y
 # liberación de memoria. Muestra brevemente el panel en pantalla; con
 # AVM_UI_NO_WINDOW=1 solo hace las comprobaciones sin ventana.
 clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
-    -o "$OUT/test_rename_ui" tests/test_rename_ui.m Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
+    -o "$OUT/test_rename_ui" tests/test_rename_ui.m App/avm_manual.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
     -framework Cocoa -framework CoreAudio -framework CoreFoundation
 "$OUT/test_rename_ui"
+# Prueba nativa de la pantalla principal compacta y de la ventana de Ayuda.
+clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
+    -o "$OUT/test_main_ui" tests/test_main_ui.m App/avm_manual.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
+    -framework Cocoa -framework CoreAudio -framework CoreFoundation
+"$OUT/test_main_ui"
 
 echo "== Verificación =="
 lipo -info "$DRV/Contents/MacOS/AVMatrix"

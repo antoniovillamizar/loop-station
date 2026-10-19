@@ -4,13 +4,16 @@
 //   ARRIBA     transmisores (fuentes), nombres verticales, agrupados y desplegables:
 //              Smaart (salidas 1-8), LISTENTO (retornos 1-8), Música (L/R).
 //   IZQUIERDA  receptores (destinos), agrupados y desplegables:
-//              Smaart (entradas 1-8; la 8 es REFERENCIA LOCAL), LISTENTO (envíos 1-8).
+//              Smaart (entradas 1-8; la 8 recibe la referencia local en el
+//              preset de medición), LISTENTO (envíos 1-8).
 //   Cruce      casilla verde con ✓ = conectado; casilla vacía = desconectado;
 //              casilla gris con × = bloqueada (lazo de realimentación).
 //   Medidores  junto a cada nombre: pico en dBFS, barra y LED rojo de saturación.
 //              Fuentes: nivel antes de la matriz. Destinos: señal real entregada,
 //              después del enrutamiento y de la suma. «—» = sin audio en ese canal.
 //              La app solo lee la propiedad 'metr' del driver: no abre audio.
+//   Ayuda      el manual completo (App/avm_manual.c) en una ventana aparte:
+//              botón «Ayuda» y menú Ayuda → Manual de AV Matrix.
 //
 // Cada casilla conecta una fuente con un destino a ganancia unidad. No hay
 // ganancias, ecualización, efectos ni delay. El driver también rechaza los lazos.
@@ -18,6 +21,7 @@
 #import <Cocoa/Cocoa.h>
 #include "../Client/avm_client.h"
 #include "../Client/avm_names.h"
+#include "avm_manual.h"
 
 static const double kRates[3] = { 44100.0, 48000.0, 96000.0 };
 
@@ -95,8 +99,8 @@ static NSString* SourceLongName(int s)
 static NSString* DestLongName(int d)
 {
     NSString* a = ChannelAlias(avm_names_dst_index(d));
-    if (d == AVM_DST_LOCAL_REFERENCE)   // el distintivo REFERENCIA LOCAL se conserva siempre
-        return a ? [NSString stringWithFormat:@"Smaart Entrada 8 «%@» (REFERENCIA LOCAL)", a] : @"Smaart Entrada 8 (REFERENCIA LOCAL)";
+    if (d == AVM_DST_LOCAL_REFERENCE)   // la descripción de la ruta sigue indicando su función
+        return a ? [NSString stringWithFormat:@"Smaart Entrada 8 «%@» (referencia local)", a] : @"Smaart Entrada 8 (referencia local)";
     char b[64];
     avm_dest_name(d, b, sizeof(b));
     return a ? [NSString stringWithFormat:@"%@ «%@»", UTF8(b), a] : UTF8(b);
@@ -146,20 +150,21 @@ typedef struct {
 
 // Geometría (puntos).
 static const CGFloat kCell = 20.0;      // lado de cada casilla
-static const CGFloat kLeftW = 386.0;    // nombres de los receptores + sus medidores
+static const CGFloat kLeftW = 268.0;    // nombres de los receptores + sus medidores (compacto)
 static const CGFloat kTopH = 184.0;     // nombres verticales de los transmisores + sus medidores
 static const CGFloat kSumW = 40.0;      // columna de aviso de suma, a la derecha
 
-// Medidores de los receptores (a la derecha del nombre, en cada fila).
-static const CGFloat kRxMeterX = 254.0, kRxMeterW = 64.0;
-static const CGFloat kRxDbX = 322.0, kRxDbW = 44.0;
-static const CGFloat kRxClipX = 370.0;
+// Fila de un receptor, de izquierda a derecha: número (6-20), nombre (24 hasta
+// kRxNameMaxX), barra, dBFS y LED de saturación. Los nombres largos se recortan
+// con «…» y se leen completos en la ayuda emergente.
+static const CGFloat kRxNameX = 24.0;
+static const CGFloat kRxMeterX = 150.0, kRxMeterW = 56.0;
+static const CGFloat kRxNameMaxX = 142.0;   // kRxMeterX - 8
+static const CGFloat kRxDbX = 210.0, kRxDbW = 40.0;
+static const CGFloat kRxClipX = 254.0;
 // Medidores de los transmisores (debajo del nombre vertical, en cada columna).
 static const CGFloat kTxMeterH = 80.0;  // LED + barra + dBFS
 static const CGFloat kTxBarH = 50.0;
-
-// Ancho del distintivo REFERENCIA LOCAL (texto de 9 pt en negrita + márgenes).
-static const CGFloat kRefBadgeW = 104.0;
 
 // Escala de los medidores: de -60 a 0 dBFS.
 static const float kMeterFloorDb = -60.0f;
@@ -291,7 +296,41 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     }
     NSSize size = NSMakeSize(kLeftW + _ncols * kCell + kSumW, kTopH + _nrows * kCell + 1);
     [self setFrameSize:size];
+    [self rebuildToolTips];
     [self setNeedsDisplay:YES];
+}
+
+// Ayuda emergente sobre el nombre de cada canal: el nombre completo aunque esté
+// recortado en pantalla. El texto se calcula al mostrarse (sigue a los cambios de nombre).
+- (void)rebuildToolTips
+{
+    [self removeAllToolTips];
+    for (int ri = 0; ri < _nrows; ri++)
+        if (_rows[ri].channel >= 0)
+            [self addToolTipRect:[self rxNameRectForRow:ri] owner:self userData:NULL];
+    for (int ci = 0; ci < _ncols; ci++)
+        if (_cols[ci].channel >= 0)
+            [self addToolTipRect:NSMakeRect(kLeftW + ci * kCell, 0, kCell, kTopH - kTxMeterH) owner:self userData:NULL];
+}
+
+- (NSRect)rxNameRectForRow:(int)ri
+{
+    return NSMakeRect(0, kTopH + ri * kCell, kRxNameMaxX, kCell);
+}
+
+// Texto completo de un canal: número, nombre mostrado y descripción larga.
+- (NSString*)fullNameForIndex:(int)idx
+{
+    NSString* shown = ChannelAlias(idx) ?: ChannelDefault(idx);
+    NSString* full = idx < AVM_NUM_SOURCES ? SourceLongName(idx) : DestLongName(idx - AVM_NUM_SOURCES);
+    return [NSString stringWithFormat:@"%@ · %@\n%@\nDoble clic para cambiar el nombre.", ChannelNumber(idx), shown, full];
+}
+
+- (NSString*)view:(NSView*)view stringForToolTip:(NSToolTipTag)tag point:(NSPoint)point userData:(void*)data
+{
+    (void)view; (void)tag; (void)data;
+    int idx = [self channelNameIndexAt:point];
+    return idx >= 0 ? [self fullNameForIndex:idx] : @"";
 }
 
 - (void)saveOpenState
@@ -370,7 +409,6 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     NSColor* groupFill = [[NSColor labelColor] colorWithAlphaComponent:0.10];
     NSColor* gridColor = [[NSColor labelColor] colorWithAlphaComponent:0.18];
     NSColor* hoverFill = [[NSColor controlAccentColor] colorWithAlphaComponent:0.12];
-    NSColor* refFill = [[NSColor systemOrangeColor] colorWithAlphaComponent:0.10];
     NSColor* green = [NSColor systemGreenColor];
 
     [bg setFill];
@@ -386,14 +424,15 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     [@"nivel antes de la matriz →" drawAtPoint:NSMakePoint(kLeftW - 140, kTopH - kTxMeterH / 2 - 6) withAttributes:dimAttr];
     [@"Receptores ↓" drawAtPoint:NSMakePoint(8, kTopH - 18) withAttributes:dimAttr];
     [@"nivel entregado" drawAtPoint:NSMakePoint(kRxMeterX, kTopH - 30) withAttributes:dimAttr];
-    [@"dBFS" drawAtPoint:NSMakePoint(kRxDbX + 14, kTopH - 18) withAttributes:dimAttr];
-    [@"SAT" drawAtPoint:NSMakePoint(kRxClipX - 4, kTopH - 18) withAttributes:dimAttr];
+    // «dBFS» alineado a la derecha de su columna; «SAT» centrado sobre el LED, una
+    // línea más arriba para no pegarse a «dBFS» en la zona compacta.
+    [@"dBFS" drawAtPoint:NSMakePoint(kRxDbX + kRxDbW - [@"dBFS" sizeWithAttributes:dimAttr].width, kTopH - 18) withAttributes:dimAttr];
+    [@"SAT" drawAtPoint:NSMakePoint(kRxClipX + 4 - [@"SAT" sizeWithAttributes:dimAttr].width / 2, kTopH - 30) withAttributes:dimAttr];
 
-    // Fondos de cabeceras de grupo, referencia local y carriles bajo el ratón.
+    // Fondos de cabeceras de grupo y carriles bajo el ratón.
     for (int ri = 0; ri < _nrows; ri++) {
         NSRect band = NSMakeRect(0, kTopH + ri * kCell, kLeftW + gridW, kCell);
         if (_rows[ri].channel < 0) { [groupFill setFill]; NSRectFillUsingOperation(band, NSCompositingOperationSourceOver); }
-        if (_rows[ri].channel == AVM_DST_LOCAL_REFERENCE) { [refFill setFill]; NSRectFillUsingOperation(band, NSCompositingOperationSourceOver); }
         if (ri == _hoverRow) { [hoverFill setFill]; NSRectFillUsingOperation(band, NSCompositingOperationSourceOver); }
     }
     for (int ci = 0; ci < _ncols; ci++) {
@@ -445,9 +484,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
                                   NSForegroundColorAttributeName: [NSColor secondaryLabelColor] };
             NSString* num = ChannelNumber(avm_names_dst_index(r.channel));
             [num drawAtPoint:NSMakePoint(20 - [num sizeWithAttributes:na].width, y + 2) withAttributes:na];
-            CGFloat nameMaxW = kRxMeterX - 8 - 24;
-            if (r.channel == AVM_DST_LOCAL_REFERENCE) nameMaxW -= kRefBadgeW + 6;
-            [FitString(RxChannelName(r.channel), chanAttr, nameMaxW) drawAtPoint:NSMakePoint(24, y + 1) withAttributes:chanAttr];
+            [FitString(RxChannelName(r.channel), chanAttr, kRxNameMaxX - kRxNameX) drawAtPoint:NSMakePoint(kRxNameX, y + 1) withAttributes:chanAttr];
 
             // Medidor del destino (señal entregada, después de la matriz).
             avm_meter_reading mr = _dstM[r.channel];
@@ -459,16 +496,6 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
             NSSize ts = [t sizeWithAttributes:da];
             [t drawAtPoint:NSMakePoint(kRxDbX + kRxDbW - ts.width, rowY + (kCell - ts.height) / 2.0) withAttributes:da];
             [self drawClipLED:NSMakeRect(kRxClipX, rowY + 6, 8, 8) on:mr.clip active:mr.active];
-            if (r.channel == AVM_DST_LOCAL_REFERENCE) {
-                NSString* badge = @"REFERENCIA LOCAL";
-                NSDictionary* ba = @{ NSFontAttributeName: [NSFont boldSystemFontOfSize:9], NSForegroundColorAttributeName: [NSColor whiteColor] };
-                NSSize bs = [badge sizeWithAttributes:ba];
-                // Distintivo fijo a la derecha del nombre: se conserva con cualquier alias.
-                NSRect br = NSMakeRect(kRxMeterX - 8 - kRefBadgeW, y + 1, bs.width + 10, kCell - 6);
-                [[NSColor systemOrangeColor] setFill];
-                [[NSBezierPath bezierPathWithRoundedRect:br xRadius:4 yRadius:4] fill];
-                [badge drawAtPoint:NSMakePoint(br.origin.x + 5, br.origin.y + (br.size.height - bs.height) / 2.0) withAttributes:ba];
-            }
         }
     }
 
@@ -603,7 +630,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
 - (int)channelNameIndexAt:(NSPoint)p
 {
     int ri = [self rowAtY:p.y], ci = [self colAtX:p.x];
-    if (ri >= 0 && p.x < kRxMeterX - 4 && _rows[ri].channel >= 0) return avm_names_dst_index(_rows[ri].channel);
+    if (ri >= 0 && p.x < kRxNameMaxX && _rows[ri].channel >= 0) return avm_names_dst_index(_rows[ri].channel);
     if (ci >= 0 && p.y < kTopH - kTxMeterH && _cols[ci].channel >= 0) return avm_names_src_index(_cols[ci].channel);
     return -1;
 }
@@ -612,7 +639,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
 {
     if (idx >= AVM_NUM_SOURCES) {
         int ri = [self rowAtY:p.y];
-        return NSMakeRect(24, kTopH + ri * kCell, kRxMeterX - 32, kCell);
+        return NSMakeRect(kRxNameX, kTopH + ri * kCell, kRxNameMaxX - kRxNameX, kCell);
     }
     int ci = [self colAtX:p.x];
     return NSMakeRect(kLeftW + ci * kCell, 0, kCell, kTopH - kTxMeterH);
@@ -722,7 +749,7 @@ static NSString* const kRenameSaveFailed = @"No se pudo guardar el nombre en dis
     // ensanchan el panel.
     const CGFloat inner = kRenameW - 24;
 
-    // Título: hasta 2 líneas (alias de 32 caracteres + «(REFERENCIA LOCAL)»).
+    // Título: hasta 2 líneas (alias de 32 caracteres + «(referencia local)»).
     NSTextField* title = [NSTextField wrappingLabelWithString:[NSString stringWithFormat:@"Nombre del canal %@ — %@", ChannelNumber(self.index), full]];
     title.font = [NSFont boldSystemFontOfSize:12];
     title.maximumNumberOfLines = 2;
@@ -882,6 +909,256 @@ static NSPopover* AVMMakeRenamePopover(int idx, void (^onChange)(void))
 }
 
 // ---------------------------------------------------------------------------
+#pragma mark Ayuda (manual de uso)
+
+// Ventana independiente con el manual completo: índice de secciones a la
+// izquierda y texto con desplazamiento a la derecha. Redimensionable. El texto
+// está compilado en la app (avm_manual.c): no necesita internet ni archivos.
+@interface AVMHelpController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate>
+@property (strong) NSWindow* window;
+@property (strong) NSTableView* index;
+@property (strong) NSTextView* text;
+@property (strong) NSScrollView* textScroll;
+- (void)show;
+- (void)showSection:(int)i;
+- (NSRange)rangeOfSection:(int)i;
+- (int)sectionAtTop;
+- (CGFloat)topOfSection:(int)i;
+@end
+
+@implementation AVMHelpController {
+    NSRange _ranges[64];     // rango del título de cada sección en el texto
+    BOOL _scrollingFromIndex;
+}
+
+// Convierte el marcado mínimo del manual (párrafos, «### », «- ») en texto con estilo.
+static NSAttributedString* ManualText(NSRange* ranges, int maxRanges)
+{
+    NSMutableAttributedString* out = [[NSMutableAttributedString alloc] init];
+    NSFont* body = [NSFont systemFontOfSize:13];
+    NSMutableParagraphStyle* para = [[NSMutableParagraphStyle alloc] init];
+    para.paragraphSpacing = 6;
+    para.lineSpacing = 1.5;
+    NSMutableParagraphStyle* bullet = [para mutableCopy];
+    bullet.headIndent = 18;
+    bullet.firstLineHeadIndent = 4;
+    bullet.paragraphSpacing = 3;
+    bullet.tabStops = @[ [[NSTextTab alloc] initWithTextAlignment:NSTextAlignmentLeft location:18 options:@{}] ];
+    NSMutableParagraphStyle* h1 = [para mutableCopy];
+    h1.paragraphSpacingBefore = 18;
+    h1.paragraphSpacing = 8;
+    NSMutableParagraphStyle* h2 = [para mutableCopy];
+    h2.paragraphSpacingBefore = 8;
+    h2.paragraphSpacing = 3;
+    NSDictionary* bodyA = @{ NSFontAttributeName: body, NSForegroundColorAttributeName: [NSColor labelColor], NSParagraphStyleAttributeName: para };
+    NSDictionary* bulletA = @{ NSFontAttributeName: body, NSForegroundColorAttributeName: [NSColor labelColor], NSParagraphStyleAttributeName: bullet };
+    NSDictionary* h1A = @{ NSFontAttributeName: [NSFont boldSystemFontOfSize:19], NSForegroundColorAttributeName: [NSColor labelColor], NSParagraphStyleAttributeName: h1 };
+    NSDictionary* h2A = @{ NSFontAttributeName: [NSFont boldSystemFontOfSize:14], NSForegroundColorAttributeName: [NSColor labelColor], NSParagraphStyleAttributeName: h2 };
+
+    for (int i = 0; i < avm_manual_count; i++) {
+        NSString* title = [NSString stringWithFormat:@"%d. %@\n", i + 1, UTF8(avm_manual_sections[i].title)];
+        if (i < maxRanges) ranges[i] = NSMakeRange(out.length, title.length - 1);
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:title attributes:h1A]];
+        for (NSString* line in [UTF8(avm_manual_sections[i].body) componentsSeparatedByString:@"\n"]) {
+            if (line.length == 0) continue;   // los párrafos ya llevan su separación
+            if ([line hasPrefix:@"### "])
+                [out appendAttributedString:[[NSAttributedString alloc] initWithString:[[line substringFromIndex:4] stringByAppendingString:@"\n"] attributes:h2A]];
+            else if ([line hasPrefix:@"- "])
+                [out appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"•\t%@\n", [line substringFromIndex:2]] attributes:bulletA]];
+            else
+                [out appendAttributedString:[[NSAttributedString alloc] initWithString:[line stringByAppendingString:@"\n"] attributes:bodyA]];
+        }
+    }
+    return out;
+}
+
+- (void)build
+{
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 860, 620)
+                                              styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                                                backing:NSBackingStoreBuffered defer:NO];
+    self.window.title = @"Manual de AV Matrix";
+    self.window.releasedWhenClosed = NO;
+    self.window.minSize = NSMakeSize(560, 360);
+    self.window.delegate = self;
+    self.window.frameAutosaveName = @"AVMatrixManual";
+
+    // Índice.
+    self.index = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    NSTableColumn* col = [[NSTableColumn alloc] initWithIdentifier:@"seccion"];
+    col.title = @"Índice";
+    col.resizingMask = NSTableColumnAutoresizingMask;
+    [self.index addTableColumn:col];
+    self.index.headerView = nil;
+    self.index.dataSource = self;
+    self.index.delegate = self;
+    self.index.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    if (@available(macOS 11.0, *)) self.index.style = NSTableViewStyleSourceList;
+    NSScrollView* indexScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 230, 620)];
+    indexScroll.documentView = self.index;
+    indexScroll.hasVerticalScroller = YES;
+    indexScroll.autohidesScrollers = YES;
+    indexScroll.autoresizingMask = NSViewHeightSizable;
+
+    // Texto del manual.
+    self.textScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 630, 620)];
+    self.textScroll.hasVerticalScroller = YES;
+    self.textScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    NSSize cs = self.textScroll.contentSize;
+    self.text = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, cs.width, cs.height)];
+    self.text.editable = NO;
+    self.text.selectable = YES;
+    self.text.richText = YES;
+    self.text.drawsBackground = YES;
+    self.text.backgroundColor = [NSColor textBackgroundColor];
+    self.text.textContainerInset = NSMakeSize(22, 14);
+    self.text.minSize = NSMakeSize(0, cs.height);
+    self.text.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+    self.text.verticallyResizable = YES;
+    self.text.horizontallyResizable = NO;
+    self.text.autoresizingMask = NSViewWidthSizable;
+    self.text.textContainer.widthTracksTextView = YES;
+    self.text.textContainer.containerSize = NSMakeSize(cs.width, CGFLOAT_MAX);
+    [self.text.textStorage setAttributedString:ManualText(_ranges, 64)];
+    self.textScroll.documentView = self.text;
+
+    NSSplitView* split = [[NSSplitView alloc] initWithFrame:self.window.contentView.bounds];
+    split.vertical = YES;
+    split.dividerStyle = NSSplitViewDividerStyleThin;
+    split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [split addSubview:indexScroll];
+    [split addSubview:self.textScroll];
+    [split setHoldingPriority:NSLayoutPriorityDefaultHigh forSubviewAtIndex:0];
+    [self.window.contentView addSubview:split];
+    [split adjustSubviews];
+    [split setPosition:230 ofDividerAtIndex:0];
+
+    // Al desplazar el texto, el índice marca la sección visible.
+    self.textScroll.contentView.postsBoundsChangedNotifications = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(textScrolled:)
+                                                 name:NSViewBoundsDidChangeNotification object:self.textScroll.contentView];
+    [self.window center];
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)show
+{
+    if (!self.window) {
+        [self build];
+        [self showSection:0];
+    }
+    [self.window makeKeyAndOrderFront:nil];
+}
+
+- (NSRange)rangeOfSection:(int)i
+{
+    return (i >= 0 && i < avm_manual_count && i < 64) ? _ranges[i] : NSMakeRange(NSNotFound, 0);
+}
+
+// Posición vertical (en el texto) del título de una sección.
+- (CGFloat)topOfSection:(int)i
+{
+    NSLayoutManager* lm = self.text.layoutManager;
+    [lm ensureLayoutForTextContainer:self.text.textContainer];
+    NSRange g = [lm glyphRangeForCharacterRange:[self rangeOfSection:i] actualCharacterRange:NULL];
+    NSRect r = [lm boundingRectForGlyphRange:g inTextContainer:self.text.textContainer];
+    return r.origin.y + self.text.textContainerOrigin.y;
+}
+
+// Lleva el título de la sección al principio de la zona visible.
+- (void)showSection:(int)i
+{
+    if (i < 0 || i >= avm_manual_count) return;
+    if (!self.window) [self build];
+    NSClipView* clip = self.textScroll.contentView;
+    CGFloat y = [self topOfSection:i] - 6;
+    CGFloat maxY = MAX(0, NSHeight(self.text.frame) - NSHeight(clip.bounds));
+    y = MAX(0, MIN(y, maxY));
+    _scrollingFromIndex = YES;
+    [clip scrollToPoint:NSMakePoint(0, y)];
+    [self.textScroll reflectScrolledClipView:clip];
+    _scrollingFromIndex = NO;
+    if (self.index.selectedRow != i)
+        [self.index selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)i] byExtendingSelection:NO];
+}
+
+// Última sección cuyo título ya está en (o por encima de) la parte superior visible.
+- (int)sectionAtTop
+{
+    CGFloat top = NSMinY(self.textScroll.contentView.bounds) + 12;
+    int best = 0;
+    for (int i = 0; i < avm_manual_count; i++)
+        if ([self topOfSection:i] <= top) best = i;
+    return best;
+}
+
+- (void)textScrolled:(NSNotification*)n
+{
+    (void)n;
+    if (_scrollingFromIndex) return;
+    int i = [self sectionAtTop];
+    if (self.index.selectedRow != i) {
+        _scrollingFromIndex = YES;   // seleccionar no debe volver a desplazar el texto
+        [self.index selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)i] byExtendingSelection:NO];
+        [self.index scrollRowToVisible:i];
+        _scrollingFromIndex = NO;
+    }
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView*)tv { (void)tv; return avm_manual_count; }
+
+- (id)tableView:(NSTableView*)tv objectValueForTableColumn:(NSTableColumn*)c row:(NSInteger)row
+{
+    (void)tv; (void)c;
+    return [NSString stringWithFormat:@"%ld. %@", (long)row + 1, UTF8(avm_manual_sections[row].title)];
+}
+
+- (NSView*)tableView:(NSTableView*)tv viewForTableColumn:(NSTableColumn*)c row:(NSInteger)row
+{
+    NSTextField* f = [tv makeViewWithIdentifier:@"fila" owner:self];
+    if (!f) {
+        // Títulos largos en dos líneas (la altura de la fila se calcula abajo).
+        f = [NSTextField wrappingLabelWithString:@""];
+        f.identifier = @"fila";
+        f.font = [NSFont systemFontOfSize:12];
+        f.maximumNumberOfLines = 2;
+        f.cell.truncatesLastVisibleLine = YES;
+    }
+    f.stringValue = [self tableView:tv objectValueForTableColumn:c row:row];
+    f.toolTip = f.stringValue;
+    return f;
+}
+
+- (CGFloat)tableView:(NSTableView*)tv heightOfRow:(NSInteger)row
+{
+    CGFloat w = MAX(80, (tv.tableColumns.firstObject.width ?: 200) - 12);
+    NSString* t = [self tableView:tv objectValueForTableColumn:nil row:row];
+    NSRect b = [t boundingRectWithSize:NSMakeSize(w, CGFLOAT_MAX) options:NSStringDrawingUsesLineFragmentOrigin
+                            attributes:@{ NSFontAttributeName: [NSFont systemFontOfSize:12] }];
+    return MIN(ceil(b.size.height), 32) + 8;   // una o dos líneas
+}
+
+- (void)tableViewColumnDidResize:(NSNotification*)n
+{
+    (void)n;
+    [self.index noteHeightOfRowsWithIndexesChanged:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, (NSUInteger)avm_manual_count)]];
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification*)n
+{
+    (void)n;
+    if (_scrollingFromIndex) return;
+    NSInteger row = self.index.selectedRow;
+    if (row >= 0) [self showSection:(int)row];
+}
+
+@end
+
+// ---------------------------------------------------------------------------
 #pragma mark Controlador
 
 @interface AVMController : NSObject <NSApplicationDelegate, NSWindowDelegate, AVMMatrixViewDelegate, NSPopoverDelegate>
@@ -898,6 +1175,7 @@ static NSPopover* AVMMakeRenamePopover(int idx, void (^onChange)(void))
 @property (assign) BOOL listening;
 @property (strong) NSTimer* meterTimer;
 @property (strong) NSPopover* renamePopover;   // panel abierto; se suelta al cerrarse
+@property (strong) AVMHelpController* help;    // ventana del manual (se crea al abrirla)
 @end
 
 static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
@@ -967,7 +1245,16 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     NSMenu* appMenu = [[NSMenu alloc] init];
     [appMenu addItemWithTitle:@"Salir de AV Matrix" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
+
+    // Menú Ayuda → Manual de AV Matrix (⌘?).
+    NSMenuItem* helpItem = [[NSMenuItem alloc] initWithTitle:@"Ayuda" action:NULL keyEquivalent:@""];
+    [bar addItem:helpItem];
+    NSMenu* helpMenu = [[NSMenu alloc] initWithTitle:@"Ayuda"];
+    NSMenuItem* manual = [helpMenu addItemWithTitle:@"Manual de AV Matrix" action:@selector(showHelp:) keyEquivalent:@"?"];
+    manual.target = self;
+    helpItem.submenu = helpMenu;
     NSApp.mainMenu = bar;
+    NSApp.helpMenu = helpMenu;
 }
 
 - (void)buildWindow
@@ -989,13 +1276,15 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     NSButton* reloadBtn = [NSButton buttonWithTitle:@"Recargar" target:self action:@selector(reloadPressed:)];
     self.recoverButton = [NSButton buttonWithTitle:@"Reparar frecuencia" target:self action:@selector(recoverPressed:)];
     self.recoverButton.hidden = YES;
-    for (NSButton* b in @[ measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton ])
+    NSButton* helpBtn = [NSButton buttonWithTitle:@"Ayuda" target:self action:@selector(showHelp:)];
+    helpBtn.toolTip = @"Manual de AV Matrix: dispositivos, matriz, presets, medidores, nombres, frecuencias y problemas.";
+    for (NSButton* b in @[ measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton, helpBtn ])
         b.controlSize = NSControlSizeSmall, b.font = [NSFont systemFontOfSize:11];
     self.ratePopup.controlSize = NSControlSizeSmall;
     self.ratePopup.font = [NSFont systemFontOfSize:11];
 
     NSStackView* toolbar = [NSStackView stackViewWithViews:@[ Label(@"AV Matrix", 14, YES), Label(@"Frecuencia:", 11, NO), self.ratePopup,
-                                                              measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton ]];
+                                                              measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton, helpBtn ]];
     toolbar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     toolbar.spacing = 6;
 
@@ -1023,14 +1312,8 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     self.infoLabel.textColor = [NSColor secondaryLabelColor];
     self.infoLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
-    NSTextField* legend = [NSTextField wrappingLabelWithString:@"Verde ✓ = conectado · vacía = desconectada · gris × = bloqueada (lazo) · ⊟/⊞ plegar o desplegar grupo · Σ = suma de fuentes.\n"
-                                @"Medidores (pico dBFS): fuentes = antes de la matriz · destinos = señal entregada tras la suma · ● rojo = saturación (2 s) · — = sin audio. "
-                                @"Solo transporte y enrutamiento: sin ecualización, efectos, análisis ni delay."];
-    legend.font = [NSFont systemFontOfSize:10];
-    legend.preferredMaxLayoutWidth = 900;
-    legend.textColor = [NSColor tertiaryLabelColor];
-
-    self.root = [NSStackView stackViewWithViews:@[ toolbar, self.statusLabel, self.scrollView, self.infoLabel, legend ]];
+    // La leyenda y las explicaciones generales están en la ventana de Ayuda.
+    self.root = [NSStackView stackViewWithViews:@[ toolbar, self.statusLabel, self.scrollView, self.infoLabel ]];
     self.root.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.root.alignment = NSLayoutAttributeLeading;
     self.root.spacing = 6;
@@ -1259,6 +1542,13 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     avm_matrix m;
     avm_matrix_clear(&m);
     [self apply:&m];
+}
+
+- (void)showHelp:(id)sender
+{
+    (void)sender;
+    if (!self.help) self.help = [[AVMHelpController alloc] init];
+    [self.help show];
 }
 
 - (void)expandAll:(id)sender   { (void)sender; [self.matrixView expandAll:YES]; }

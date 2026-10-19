@@ -31,11 +31,13 @@ La app **AV Matrix** muestra la matriz como pantalla principal, con la organizac
   - **LISTENTO**: Retorno 1-8 (lo que LISTENTO recibe de Colombia).
   - **Música**: L/R (lo que se reproduce en «AV Matrix Música»).
 - **A la izquierda, los receptores (destinos)**, agrupados y desplegables:
-  - **Smaart**: Entrada 1-8 (lo que Smaart recibe). **Entrada 8 = REFERENCIA LOCAL**, con etiqueta naranja.
+  - **Smaart**: Entrada 1-8 (lo que Smaart recibe). La Entrada 8 recibe la referencia local en el preset de medición; es un receptor normal (sin distintivo propio en la matriz).
   - **LISTENTO**: Envío 1-8 (lo que LISTENTO manda a Colombia).
 - **Casilla verde con ✓** = conexión activa. **Casilla vacía** = desconectada. **Casilla gris con ×** = bloqueada.
 - Un punto verde en una cabecera o en un grupo plegado indica que hay conexiones dentro. Al hacer clic se despliega; nunca cambia conexiones.
-- Al pasar el ratón se resaltan la fila y la columna, y abajo se lee la ruta completa (por ejemplo «Smaart Salida 1 → Smaart Entrada 8 (REFERENCIA LOCAL): conectado»).
+- Al pasar el ratón se resaltan la fila y la columna, y abajo se lee la ruta completa (por ejemplo «Smaart Salida 1 → Smaart Entrada 8 (referencia local): conectado»).
+- La zona de receptores es compacta: número, nombre, barra, dBFS y saturación. Un nombre que no cabe se recorta con «…» y se lee completo en la ayuda emergente al dejar el ratón encima.
+- **Ayuda:** el botón «Ayuda» de la barra superior y el menú **Ayuda → Manual de AV Matrix** (⌘?) abren el manual completo en una ventana aparte, con índice y desplazamiento. Está incluido en la app (`App/avm_manual.c`) y funciona sin internet. La leyenda de colores y las explicaciones generales están ahí.
 - La ventana se ajusta al tamaño de la matriz, y el estado plegado o desplegado de cada grupo se recuerda.
 
 Cada casilla conecta una fuente con un destino a **ganancia unidad** (0 dB). No hay ganancias variables.
@@ -48,7 +50,7 @@ Cada casilla conecta una fuente con un destino a **ganancia unidad** (0 dB). No 
 
 | Preset | Conexiones |
 | --- | --- |
-| **Medición** (predeterminado; botón «Preset medición», `avmctl preset default`) | Smaart Salida N → LISTENTO Envío N (1-8) · LISTENTO Retorno N → Smaart Entrada N (1-7) · **Smaart Salida 1 → Smaart Entrada 8 (REFERENCIA LOCAL)**, sin el retorno 8 de LISTENTO |
+| **Medición** (predeterminado; botón «Preset medición», `avmctl preset default`) | Smaart Salida N → LISTENTO Envío N (1-8) · LISTENTO Retorno N → Smaart Entrada N (1-7) · **Smaart Salida 1 → Smaart Entrada 8 (referencia local)**, sin el retorno 8 de LISTENTO |
 | **Directo 8×8** (botón «Directo 8×8», `avmctl preset direct`) | Smaart Salida N → LISTENTO Envío N y LISTENTO Retorno N → Smaart Entrada N, de 1 a 8, sin referencia local |
 | **Vaciar** (`avmctl preset clear`) | Ninguna |
 
@@ -59,8 +61,8 @@ Con el preset de medición, Smaart genera ruido rosa por la Salida 1. La señal 
 Los 34 canales se pueden renombrar desde la app: Smaart Salidas 1-8, LISTENTO Retornos 1-8, Música L/R, Smaart Entradas 1-8 y LISTENTO Envíos 1-8.
 
 - **Doble clic** sobre el nombre de un canal (arriba o a la izquierda) abre un campo. **Enter** guarda y **Escape** (o un clic fuera) cancela. **«Restaurar nombre original»** está en ese panel y en el menú del clic derecho. Un nombre vacío o igual al original también restaura.
-- **El número del canal siempre queda visible:** arriba como «3 · Nombre», a la izquierda en su propia columna. La Entrada 8 conserva el distintivo **REFERENCIA LOCAL** con cualquier nombre.
-- Los nombres aparecen en las cabeceras y en las descripciones de las rutas (por ejemplo, «Smaart Salida 1 «Generador rosa» → Smaart Entrada 8 «Señal de referencia» (REFERENCIA LOCAL)»). Admiten español, tildes y eñes, hasta 32 caracteres.
+- **El número del canal siempre queda visible:** arriba como «3 · Nombre», a la izquierda en su propia columna. Si no cabe, se recorta con «…» y la ayuda emergente lo muestra completo.
+- Los nombres aparecen en las cabeceras y en las descripciones de las rutas (por ejemplo, «Smaart Salida 1 «Generador rosa» → Smaart Entrada 8 «Señal de referencia» (referencia local)»). Admiten español, tildes y eñes, hasta 32 caracteres.
 - Se guardan en `~/Library/Application Support/AV Matrix/nombres_canales.txt` (UTF-8, guardado atómico). Se conservan al cerrar la app, al reiniciar el Mac y al actualizar o reinstalar AV Matrix; el desinstalador no lo borra. Cada nombre se identifica por dispositivo, dirección y número: `smaart.out.1-8`, `listento.out.1-8`, `music.out.1-2`, `smaart.in.1-8` y `listento.in.1-8`.
 - **Renombrar solo cambia el texto que muestra la app.** No toca el driver, las conexiones, la numeración interna, los niveles ni el funcionamiento. Smaart y LISTENTO siguen viendo los nombres de canal del driver.
 

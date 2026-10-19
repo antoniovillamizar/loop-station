@@ -69,8 +69,8 @@ avmctl test
    avmctl preset default
    avmctl show
    ```
-   Smaart Salida 1 llega a **Smaart Entrada 8 (REFERENCIA LOCAL)**. Las entradas 1-7 esperan los retornos de LISTENTO; con LISTENTO cerrado quedan en silencio.
-2. Abre la app **AV Matrix** (en Aplicaciones). Comprueba en la matriz la casilla verde ✓ en el cruce de la columna **Smaart → Salida 1** con la fila **Smaart → Entrada 8 · REFERENCIA LOCAL**.
+   Smaart Salida 1 llega a **Smaart Entrada 8 (referencia local)**. Las entradas 1-7 esperan los retornos de LISTENTO; con LISTENTO cerrado quedan en silencio.
+2. Abre la app **AV Matrix** (en Aplicaciones). Comprueba en la matriz la casilla verde ✓ en el cruce de la columna **Smaart → Salida 1** con la fila **Smaart → 8 · Entrada 8**.
 3. Abre **Smaart**. Si pide permiso de micrófono, acéptalo.
 4. En la configuración de audio de Smaart (I/O Config), elige **AV Matrix Smaart** como dispositivo de **entrada** y de **salida**. El canal 8 debe aparecer como «Entrada 8 (referencia local)».
 5. Generador: **ruido rosa** por la **Salida 1** de AV Matrix Smaart. Empieza con un nivel bajo.
@@ -85,15 +85,17 @@ Anota lo que observes:
 - [ ] ¿Las Entradas 1-7 quedan en silencio?
 - [ ] ¿Hay cortes o chasquidos?
 - [ ] ¿La matriz de la app se entiende como la de Dante?
-- [ ] Medidores: con el ruido rosa en marcha, ¿**Smaart Salida 1** (arriba) y **Entrada 8 · REFERENCIA LOCAL** (izquierda) marcan el mismo nivel en dBFS que indica Smaart?
+- [ ] Medidores: con el ruido rosa en marcha, ¿**Smaart Salida 1** (arriba) y **Entrada 8** (izquierda) marcan el mismo nivel en dBFS que indica Smaart?
 - [ ] ¿Las Entradas 1-7 muestran «—» con LISTENTO cerrado?
 - [ ] Al subir el generador a 0 dBFS, ¿se enciende el LED rojo de saturación en Salida 1 y Entrada 8, y se apaga unos 2 s después de bajarlo?
 - [ ] Al detener el generador en Smaart, ¿los medidores pasan a «—» en menos de medio segundo?
 - [ ] Al cerrar y volver a abrir la app AV Matrix, ¿Smaart sigue recibiendo sin cortes?
 - [ ] Nombres: doble clic sobre «Salida 1» y escribe «Generador rosa» + Enter. ¿Aparece «1 · Generador rosa» arriba y en la descripción de la ruta, con las conexiones y el nivel iguales?
-- [ ] Doble clic sobre «Entrada 8», escribe «Señal de referencia» y pulsa Escape: ¿no cambia? Repite con Enter: ¿conserva el distintivo REFERENCIA LOCAL?
+- [ ] Doble clic sobre «Entrada 8», escribe «Señal de referencia» y pulsa Escape: ¿no cambia? Repite con Enter: ¿aparece «8 · Señal de referencia» y, al dejar el ratón encima, el nombre completo?
 - [ ] Clic derecho sobre el nombre → «Restaurar nombre original»: ¿vuelve el nombre de fábrica?
 - [ ] Cierra y abre la app: ¿se conservan los nombres con sus tildes?
+- [ ] Pantalla compacta: ¿se leen número, nombre, barra, dBFS y saturación de cada receptor sin solaparse, y la Entrada 8 sin rótulo naranja?
+- [ ] Botón «Ayuda» y menú Ayuda → Manual de AV Matrix: ¿se abre el manual? ¿Lleva cada entrada del índice a su sección? ¿Se puede agrandar y achicar la ventana?
 
 ## 7. Al terminar
 

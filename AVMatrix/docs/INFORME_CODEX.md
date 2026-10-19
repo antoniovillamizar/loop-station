@@ -1,8 +1,108 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 10; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 11; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 10 — ancho fijo del panel de nombres y espera de la prueba de liberación (sobre `2ae5475`)
+## 0. Revisión 11 — pantalla principal simplificada y manual en la app (sobre `cf5f158`)
+
+Encargo: compactar los receptores, quitar el distintivo «REFERENCIA LOCAL» y mover la leyenda y las explicaciones a una ventana de Ayuda con el manual completo. Antes de modificar se hizo una copia de seguridad del proyecto en `cf5f158`. **No se instaló nada ni se reinició coreaudiod.** **Solo cambia la app:**
+- el driver y `avmctl` de `dist/` son idénticos a los de `cf5f158`;
+- `Client/avm_client.c` no cambia (`avmctl` sigue mostrando «Smaart Entrada 8 (REFERENCIA LOCAL)» en Terminal);
+- la matriz, los presets y el bucle Smaart Salida 1 → Entrada 8 no cambian.
+
+**Qué se comprobó y dónde:**
+- **En Linux:**
+  - el manual (`tests/test_manual.c`), con estructura, UTF-8 y los temas pedidos;
+  - las comprobaciones estáticas de la app;
+  - la compilación cruzada de la app y de las dos pruebas nativas;
+  - las maquetas con la geometría y el texto reales.
+- **En un Mac:** nada todavía. `tests/test_main_ui.m` está escrita y compilada, **sin ejecutar**.
+
+### 0.11.1 Receptores compactos (`App/AVMatrixApp.m:153`)
+
+- **Ancho:** la zona izquierda pasa de 386 a **268 pt**, y la matriz queda 118 pt más cerca.
+- **Fila de cada receptor:**
+
+  | Elemento | Posición |
+  | --- | --- |
+  | Número | 6-20 pt |
+  | Nombre | 24-142 pt (118 pt) |
+  | Barra | 150-206 pt |
+  | dBFS | 210-250 pt, alineado a la derecha |
+  | LED de saturación | 254-262 pt |
+
+  El texto «SAT» de la esquina sube una línea para no pegarse a «dBFS».
+- **Nombres largos:** se recortan con «…». La **ayuda emergente** (`rebuildToolTips`, `:305`) muestra «número · nombre», la descripción larga y «Doble clic para cambiar el nombre», en receptores y transmisores. Se calcula al mostrarse, así que sigue a los cambios de nombre. La zona de doble clic y el menú contextual usan las mismas medidas.
+- **Se conservan:** números, nombres personalizados, barras, dBFS, saturación, Σ, grupos desplegables, bloqueos, la ventana que se ajusta a la matriz, el icono y el archivo de nombres.
+
+### 0.11.2 Sin el rótulo «REFERENCIA LOCAL»
+
+- Se quitan el distintivo naranja y el fondo anaranjado de la fila de la Entrada 8; `kRefBadgeW` desaparece. La Entrada 8 se dibuja como cualquier receptor y se puede renombrar igual.
+- **En las descripciones de rutas** de la app, la Entrada 8 sigue indicando su función, ahora en minúsculas: «Smaart Entrada 8 «alias» (referencia local)». Así coincide con el nombre de canal que da el driver.
+
+### 0.11.3 Ventana de Ayuda (`AVMHelpController`, `:917`)
+
+- **Cómo se abre:**
+  - botón **«Ayuda»** al final de la barra superior;
+  - menú **Ayuda → Manual de AV Matrix** (⌘?), que es además el `NSApp.helpMenu` de macOS.
+- **La ventana:**
+  - independiente, redimensionable, con tamaño mínimo de 560 × 360 y posición recordada;
+  - **índice** a la izquierda (`NSTableView`, títulos en hasta 2 líneas) y **texto con desplazamiento** a la derecha (`NSTextView` de solo lectura, seleccionable, que se ajusta al ancho);
+  - un clic en el índice lleva el título de la sección arriba (`showSection:`, `:1073`), y al desplazar el texto el índice marca la sección visible (`textScrolled:`, `:1099`);
+  - cerrar y volver a abrir reutiliza la misma ventana.
+- **El manual** (`App/avm_manual.[ch]`, C puro y UTF-8) está compilado en la app: no necesita internet ni archivos. Tiene 13 secciones en español sencillo:
+  1. qué es AV Matrix y la pantalla principal;
+  2. los tres dispositivos y cómo seleccionarlos;
+  3. transmisores, receptores y conexiones;
+  4. grupos, colores, sumas y bloqueos;
+  5. presets;
+  6. referencia en Smaart;
+  7. envío y retorno con LISTENTO;
+  8. música estéreo;
+  9. medidores (dBFS, saturación, silencio e inactividad);
+  10. nombres;
+  11. frecuencias y formatos;
+  12. diagnóstico de problemas;
+  13. limitaciones conocidas, incluidos **los silencios pendientes a 96 kHz** y que la compatibilidad con Smaart y LISTENTO y la precisión por internet **no están verificadas del todo**.
+- El marcado mínimo (párrafos, «### » y «- ») se convierte en texto con estilo (`ManualText`, `:935`). El texto nunca se usa como cadena de formato.
+- **Pantalla principal:** se quita la leyenda inferior (`:1315`). Se conservan la barra de controles, la línea de estado, la matriz y la descripción de rutas bajo la matriz.
+
+### 0.11.4 Pruebas
+
+| Prueba | Dónde | Qué comprueba |
+| --- | --- | --- |
+| `tests/test_manual.c` (nueva, 278) | Linux | 13 secciones completas con identificadores y títulos únicos; UTF-8 estricto; marcado bien formado; los **34 temas pedidos** (dispositivos, selección, matriz, grupos, colores, Σ, bloqueos, los tres presets, referencia en Smaart, envío y retorno, música L/R, medidores, dBFS, saturación, «−∞», «—», cambiar, guardar y restaurar nombres, frecuencias, Reparar frecuencia, formatos, diagnóstico, limitaciones, **silencios a 96 kHz**, sin internet, nombre completo al pasar el ratón); hechos que deben coincidir con el código (preset, bloqueo, 2 s, 0,25 s, 32 caracteres); sin «REFERENCIA LOCAL» ni «distintivo». Mutación (quitar la frase de 96 kHz): detectada |
+| `tests/test_main_ui.m` (nueva, nativa) | Mac (sin ejecutar) | **Geometría:** kLeftW ≤ 280; número, nombre, barra, dBFS y LED sin solaparse; «+12.3» cabe; tamaño de la matriz desplegada. **Nombres:** la Entrada 8 sigue siendo editable; la ayuda emergente muestra el alias de 32 caracteres completo con número y dispositivo, también en un transmisor (Música L); no la hay sobre el medidor; recorte con «…» dentro de su columna; el preset de medición no cambia. **Ventana principal:** menú Ayuda → Manual (acción y `helpMenu`); botón «Ayuda»; se conservan los 7 botones, el selector de frecuencia, el estado y la descripción de rutas; sin leyenda. **Manual en pantalla:** abre, redimensionable, con desplazamiento, índice con las 13 secciones, todas en el texto y sin marcado visible; **cada entrada del índice lleva a su título**, a tamaño normal y en una ventana de 600 × 380; al desplazar se marca la sección; el texto sigue el ancho; cerrar y reabrir. Con `AVM_UI_NO_WINDOW=1` se omite la parte en pantalla |
+| `tests/test_app_strings.sh` (+8, 28) | Linux | Sin distintivo ni `kRefBadgeW`; kLeftW ≤ 280; sin leyenda; botón y menú de Ayuda; ayuda emergente registrada; el manual pasa por `UTF8()` y nunca como formato; `avm_manual.c` en UTF-8. Mutaciones (kLeftW = 386; volver a poner la leyenda): detectadas |
+| `tests/test_build_script.sh` (+3, 23) | Linux | `build.sh` incluye `avm_manual.c` en la app y ejecuta `test_manual` y `test_main_ui` |
+
+**Resultados (Linux):**
+
+| Suite | Resultado |
+| --- | --- |
+| Núcleo | 122/122 |
+| Frecuencia | 115/115 |
+| Medidores | 117/117 |
+| Nombres | 51/51 |
+| Manual | 278/278 |
+| Instalador | 102/102 (`--app-only` sin cambios) |
+| `build.sh` | 23/23 |
+| Textos | 28/28 |
+
+ASan y UBSan sin avisos (también en el manual). Compilación cruzada sin avisos.
+
+**Maquetas** (Linux, no son capturas del Mac):
+- `AVMatrix_compacta_claro.png` y `AVMatrix_compacta_oscuro.png`, con la ayuda emergente sobre la Entrada 8;
+- `AVMatrix_ayuda.png`, la ventana del manual con el texto real.
+
+**Pendiente en el Mac:**
+```bash
+AVM_UI_NO_WINDOW=1 bash scripts/build.sh   # test_rename_ui y test_main_ui sin ventanas
+bash scripts/build.sh                      # con ventanas: «Pantalla principal y ayuda: … 0 fallos»
+bash tests/mutate_rename_ui.sh
+sudo bash scripts/install.sh --app-only --dry-run   # y después sin --dry-run
+```
+
+## 0quinquies. Revisión 10 — ancho fijo del panel de nombres y espera de la prueba de liberación (sobre `2ae5475`)
 
 Codex ejecutó `AVM_UI_NO_WINDOW=1 bash scripts/build.sh` en el Mac: `test_rename_ui` dio 16 correctas y 3 fallos. `--app-only` pasó con firmas reales (incluida la restauración) y **no cambia**. Antes de modificar se hizo una copia de seguridad del proyecto en `2ae5475`. **No se instaló nada ni se reinició coreaudiod.** Solo cambian la app y sus pruebas: el driver y `avmctl` de `dist/` siguen idénticos.
 

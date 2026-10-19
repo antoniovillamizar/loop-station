@@ -34,5 +34,15 @@ check "el ancho del panel no depende del texto" bash -c 'grep -A5 "^- (void)upda
 check "el panel no toma el ancho de fittingSize" bash -c '! grep -q "MAX(s.width, kRenameW)" "$1"' _ "$APP"
 check "el AVMController suelta el panel al cerrarse" bash -c 'grep -A5 "^- (void)popoverDidClose:" "$1" | grep -q "self.renamePopover = nil"' _ "$APP"
 
+# Pantalla principal simplificada (revisión 11).
+check "sin el distintivo «REFERENCIA LOCAL» en la matriz" bash -c '! grep -q "@\"REFERENCIA LOCAL\"" "$1" && ! grep -q "kRefBadgeW" "$1"' _ "$APP"
+check "zona de receptores compacta (kLeftW ≤ 280)" bash -c 'w=$(sed -n "s/^static const CGFloat kLeftW = \([0-9.]*\);.*/\1/p" "$1"); [ -n "$w" ] && awk -v w="$w" "BEGIN{exit !(w <= 280)}"' _ "$APP"
+check "la leyenda ya no está en la ventana principal" bash -c '! grep -q "Verde ✓ = conectado" "$1"' _ "$APP"
+check "botón «Ayuda» en la barra superior" grep -q 'buttonWithTitle:@"Ayuda" target:self action:@selector(showHelp:)' "$APP"
+check "menú Ayuda → Manual de AV Matrix" grep -q 'addItemWithTitle:@"Manual de AV Matrix" action:@selector(showHelp:)' "$APP"
+check "ayuda emergente con el nombre completo de cada canal" grep -q "addToolTipRect:" "$APP"
+check "el manual se convierte con UTF8() y nunca como formato" bash -c 'grep -q "UTF8(avm_manual_sections\[i\].body)" "$1" && ! grep -qE "stringWithFormat:UTF8\(avm_manual" "$1"' _ "$APP"
+check "avm_manual.c es UTF-8 válido" bash -c 'iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1' _ "$HERE/../App/avm_manual.c"
+
 echo "Textos de la app: $PASS comprobaciones correctas, $FAIL fallos"
 [ $FAIL -eq 0 ]
