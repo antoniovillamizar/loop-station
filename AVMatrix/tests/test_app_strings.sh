@@ -19,6 +19,10 @@ for f in "$APP" "$HERE/../Client/avm_client.c" "$HERE/../Client/avmctl.c"; do
     check "$(basename "$f") es UTF-8 válido" bash -c 'iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1' _ "$f"
 done
 check "«Música» está escrito en UTF-8 en los nombres de grupo" grep -q '{ "Música",' "$APP"
+check "los alias se convierten con UTF8()" grep -q "return a ? UTF8(a) : nil;" "$APP"
+check "los alias se guardan en forma compuesta NFC (tildes)" grep -q "precomposedStringWithCanonicalMapping" "$APP"
+check "la ruta del archivo de nombres se pasa en UTF-8" grep -q "NamesFilePath().fileSystemRepresentation" "$APP"
+check "un alias nunca se usa como cadena de formato" bash -c '! grep -nE "stringWithFormat:(ChannelAlias|RxChannelName|TxChannelName|a)[,)]" <<< "$1" | grep -q .' _ "$CODE"
 
 echo "Textos de la app: $PASS comprobaciones correctas, $FAIL fallos"
 [ $FAIL -eq 0 ]

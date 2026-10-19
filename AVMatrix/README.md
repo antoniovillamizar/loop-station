@@ -54,6 +54,16 @@ Cada casilla conecta una fuente con un destino a **ganancia unidad** (0 dB). No 
 
 Con el preset de medición, Smaart genera ruido rosa por la Salida 1. La señal va a Colombia por LISTENTO Envío 1 y también llega a la Entrada 8 como referencia local. En Smaart: medición = Entrada 1 (retorno), referencia = Entrada 8. El retardo de ida y vuelta por internet lo encuentra el buscador de delay de Smaart; AV Matrix no lo compensa. Smaart ve el canal 8 con el nombre «Entrada 8 (referencia local)».
 
+### Nombres de los canales
+
+Los 34 canales se pueden renombrar desde la app: Smaart Salidas 1-8, LISTENTO Retornos 1-8, Música L/R, Smaart Entradas 1-8 y LISTENTO Envíos 1-8.
+
+- **Doble clic** sobre el nombre de un canal (arriba o a la izquierda) abre un campo. **Enter** guarda y **Escape** (o un clic fuera) cancela. **«Restaurar nombre original»** está en ese panel y en el menú del clic derecho. Un nombre vacío o igual al original también restaura.
+- **El número del canal siempre queda visible:** arriba como «3 · Nombre», a la izquierda en su propia columna. La Entrada 8 conserva el distintivo **REFERENCIA LOCAL** con cualquier nombre.
+- Los nombres aparecen en las cabeceras y en las descripciones de las rutas (por ejemplo, «Smaart Salida 1 «Generador rosa» → Smaart Entrada 8 «Señal de referencia» (REFERENCIA LOCAL)»). Admiten español, tildes y eñes, hasta 32 caracteres.
+- Se guardan en `~/Library/Application Support/AV Matrix/nombres_canales.txt` (UTF-8, guardado atómico). Se conservan al cerrar la app, al reiniciar el Mac y al actualizar o reinstalar AV Matrix; el desinstalador no lo borra. Cada nombre se identifica por dispositivo, dirección y número: `smaart.out.1-8`, `listento.out.1-8`, `music.out.1-2`, `smaart.in.1-8` y `listento.in.1-8`.
+- **Renombrar solo cambia el texto que muestra la app.** No toca el driver, las conexiones, la numeración interna, los niveles ni el funcionamiento. Smaart y LISTENTO siguen viendo los nombres de canal del driver.
+
 ### Medidores de nivel
 
 Cada canal tiene, junto a su nombre, una **barra de nivel**, la **lectura de pico en dBFS** y un **indicador rojo de saturación**:

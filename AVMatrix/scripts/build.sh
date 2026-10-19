@@ -48,7 +48,7 @@ mkdir -p "$APP/Contents/MacOS"
 cp App/Info.plist "$APP/Contents/Info.plist"
 clang $ARCHS -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
     -o "$APP/Contents/MacOS/AVMatrix" \
-    App/AVMatrixApp.m Client/avm_client.c Driver/src/avm_core.c \
+    App/AVMatrixApp.m Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
     -framework Cocoa -framework CoreAudio -framework CoreFoundation
 # Icono personalizado (antes de firmar: queda sellado en la firma del bundle).
 set +e
@@ -75,6 +75,8 @@ clang $CFLAGS -o "$OUT/test_rate" tests/test_rate.c Driver/src/avm_rate.c
 "$OUT/test_rate"
 clang $CFLAGS -o "$OUT/test_meters" tests/test_meters.c Driver/src/avm_core.c
 "$OUT/test_meters"
+clang $CFLAGS -o "$OUT/test_names" tests/test_names.c Client/avm_names.c
+"$OUT/test_names"
 bash tests/test_install.sh
 bash tests/test_app_strings.sh
 

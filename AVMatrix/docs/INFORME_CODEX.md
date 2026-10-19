@@ -1,8 +1,61 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 7; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 8; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 7 — saturación exacta según el redondeo real (sobre `2e77f49`)
+## 0. Revisión 8 — nombres personalizados de los canales (sobre `453bf79`)
+
+Encargo: poder renombrar los 34 canales (Smaart Salidas 1–8, LISTENTO Retornos 1–8, Música L/R, Smaart Entradas 1–8 y LISTENTO Envíos 1–8). Antes de modificar se hizo una copia de seguridad del proyecto en `453bf79`. **No se instaló nada ni se reinició coreaudiod.** **El driver no cambia:** los nombres son solo de la app.
+
+**Qué se comprobó y dónde:**
+- **En Linux:** el módulo de nombres (lógica, normalización, tildes, persistencia), la compilación cruzada de la app con el SDK 15.5 y una maqueta de la interfaz.
+- **En un Mac:** nada todavía. La edición en la interfaz (doble clic, Enter, Escape, panel, menú del clic derecho) **solo se compiló y se maquetó; no se ha ejecutado**.
+
+### 0.8.1 Diseño
+
+- **Módulo C portable** `Client/avm_names.[ch]` (sin CoreAudio ni AppKit), probado en Linux. La app solo lo llama.
+- **Identificación estable:** cada alias se guarda con una clave por dispositivo, dirección y número: `smaart.out.1-8`, `listento.out.1-8`, `music.out.1-2`, `smaart.in.1-8` y `listento.in.1-8`. No depende del orden interno.
+- **Normalización** (`avm_names_normalize`): UTF-8 estricto (se rechazan secuencias sobrelargas, sustitutos y Latin-1 suelto); tabuladores y saltos de línea pasan a espacio; se recortan los extremos y se unen los espacios repetidos; se quitan los caracteres de control; máximo **32 caracteres** (no bytes). La app aplica antes NFC (`precomposedStringWithCanonicalMapping`), así «é» escrito con acento combinante se guarda igual que «é».
+- **Restaurar:** un alias vacío o igual al original equivale a «Restaurar nombre original». Un alias rechazado (demasiado largo o inválido) **deja el anterior intacto**.
+- **Persistencia:** `~/Library/Application Support/AV Matrix/nombres_canales.txt`, cabecera `AVMATRIX-NOMBRES 1` y líneas `clave<TAB>alias`. Guardado atómico (`.tmp.<pid>`, `fsync`, `rename`). Fuera del bundle: sobrevive a cerrar la app, a reiniciar el Mac y a actualizar o reinstalar. `uninstall.sh` no lo borra.
+- **Carga tolerante:** se ignoran claves desconocidas (versiones futuras) y líneas inválidas; se descartan líneas demasiado largas; se aceptan CRLF y una última línea sin salto. Si el archivo no tiene cabecera, la app lo aparta como `nombres_canales.txt.dañado-<fecha>` y empieza con los nombres originales (`App/AVMatrixApp.m:1116`).
+- **Si falla el guardado,** la app revierte el cambio en memoria y lo avisa en el panel; nunca muestra un nombre que no esté en disco.
+
+### 0.8.2 Interfaz (`App/AVMatrixApp.m`)
+
+- **Doble clic** sobre el nombre de un canal (`:650`) o **clic derecho** → «Cambiar nombre…» / «Restaurar nombre original» (`:622`).
+- Panel `AVMRenameController` (`NSPopover` transitorio, `:690`): título, «Original: … · identificador: clave», campo, mensaje de error, botones Restaurar, Cancelar y Guardar. **Enter** guarda y **Escape** cancela (`:760`); un clic fuera también cancela.
+- **El número siempre queda visible:** arriba «3 · Nombre» (`TxChannelName`, `:72`); a la izquierda, en su propia columna. El texto largo se recorta con «…» sin tapar el número ni el distintivo.
+- **Entrada 8:** con cualquier alias conserva el distintivo **REFERENCIA LOCAL** en su fila y en la descripción de la ruta: `Smaart Entrada 8 «alias» (REFERENCIA LOCAL)` (`DestLongName`, `:95`).
+- **Descripciones de las rutas** (barra de estado, ayudas): `Smaart Salida 1 «Generador rosa» → …`.
+- Se amplió la zona de nombres de los receptores (columna izquierda de 336 a 386 pt) para que quepa «Señal de referencia» junto al distintivo. Medidores, icono, presets y grupos desplegables no cambian.
+- **Renombrar no envía nada al driver:** ni la matriz `'mtrx'`, ni la frecuencia, ni los niveles. Los nombres que ven Smaart y LISTENTO (del driver) no cambian.
+- Textos con `UTF8()` y `%@`; un alias nunca se usa como cadena de formato (comprobado en `tests/test_app_strings.sh`).
+
+### 0.8.3 Pruebas (`tests/test_names.c`, 51 comprobaciones; Linux)
+
+| Grupo | Qué comprueba |
+| --- | --- |
+| Claves y nombres | 34 claves únicas y estables, ida y vuelta clave ↔ índice; nombres originales («Salida 3», «Retorno 1», «Música L», «Entrada 8», «Envío 2»); números 1–8 y L/R |
+| Edición | Asignar, cambiar y leer alias; el resto de canales no cambia |
+| Cancelación | Un alias rechazado deja el anterior intacto (equivale a cancelar en la lógica; el botón y Escape de la interfaz no se pueden ejecutar en Linux) |
+| Restaurar | `avm_names_restore`, alias vacío, solo espacios e igual al original |
+| Tildes | «Señal pública · Ñandú ÁÉÍÓÚ üç», eñes, acento combinante; 32 «é» se admiten y 33 se rechazan |
+| Normalización | Espacios, tabuladores, saltos de línea, controles; UTF-8 inválido, sobrelargo y sustituto rechazados |
+| Persistencia | Guardar y recargar idéntico (con tildes), sin archivo temporal sobrante, la restauración persiste, contenido exacto del archivo, sin archivo = originales |
+| Carga robusta | Claves desconocidas, líneas sin tabulador, CRLF, última línea sin salto, línea gigante, alias inválido; archivo sin cabecera = false |
+| Errores | Guardar en una ruta imposible devuelve false |
+| Mutaciones | Clave cambiada (2 fallos), sin recortar espacios (3), sin validar UTF-8 (4): las tres se detectan |
+
+**Resultados (Linux):** nombres 51/51, núcleo 122/122, frecuencia 115/115, medidores 117/117, instalador 83/83, `build.sh` 19/19 (antes 17; comprueba que la app incluye `avm_names.c`), textos 12/12 (antes 8). ASan y UBSan sin avisos, también en `test_names`. Compilación cruzada de driver, app y `avmctl` (arm64 y x86_64) sin avisos con `-Werror`.
+
+**Pendiente en el Mac** (lista en `INSTALAR.md`):
+- Doble clic, Enter, Escape, clic fuera y menú del clic derecho.
+- Que el alias aparezca en las cabeceras y en la barra de estado, con tildes.
+- Que la Entrada 8 conserve REFERENCIA LOCAL.
+- Que los nombres sigan tras cerrar y abrir la app, reiniciar el Mac y reinstalar.
+- Que renombrar no cambie conexiones, niveles ni el audio en Smaart y LISTENTO.
+
+## 0bis. Revisión 7 — saturación exacta según el redondeo real (sobre `2e77f49`)
 
 Codex comprobó `2e77f49` en el Mac: compilación, pruebas, sanitizers y conservación del icono en una instalación simulada. Encontró un caso límite en `avm_format_delivery_clip_level`: `nearbyint` redondea al par, así que 32766,5 → 32766 (SInt16) y 8388606,5 → 8388606 (SInt24) no entregan el código máximo, pero el destino marcaba SAT por usar `>=`. Antes de modificar se hizo una copia de seguridad del proyecto en `2e77f49`. **No se instaló nada ni se reinició coreaudiod.** Todo lo de esta sección se probó **solo en Linux**.
 

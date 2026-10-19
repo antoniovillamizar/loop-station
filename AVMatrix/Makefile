@@ -20,6 +20,8 @@ test:
 	./$(BUILD)/test_rate
 	$(CC) $(CFLAGS) -o $(BUILD)/test_meters tests/test_meters.c Driver/src/avm_core.c -lm -lpthread
 	./$(BUILD)/test_meters
+	$(CC) $(CFLAGS) -o $(BUILD)/test_names tests/test_names.c Client/avm_names.c
+	./$(BUILD)/test_names
 	bash tests/test_install.sh
 	bash tests/test_build_script.sh
 	bash tests/test_app_strings.sh
@@ -36,6 +38,8 @@ test-sanitize:
 	./$(BUILD)/test_meters_asan
 	gcc -std=c11 -O1 -g -fsanitize=thread -o $(BUILD)/test_meters_tsan tests/test_meters.c Driver/src/avm_core.c -lm -lpthread
 	./$(BUILD)/test_meters_tsan
+	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_names_asan tests/test_names.c Client/avm_names.c
+	./$(BUILD)/test_names_asan
 
 cross:
 	@test -n "$(SDK)" || (echo "Indique SDK=/ruta/MacOSX.sdk" && false)
@@ -46,7 +50,7 @@ cross:
 	  clang -target $$a-apple-macos$(MINOS) $(XFLAGS) -o $(BUILD)/cross/avmctl_$$a \
 	    Client/avmctl.c Client/avm_client.c Driver/src/avm_core.c -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
-	    -o $(BUILD)/cross/app_$$a App/AVMatrixApp.m Client/avm_client.c Driver/src/avm_core.c \
+	    -o $(BUILD)/cross/app_$$a App/AVMatrixApp.m Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
 	    -framework Cocoa -framework CoreAudio -framework CoreFoundation || exit 1; \
 	done
 

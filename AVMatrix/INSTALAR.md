@@ -90,6 +90,10 @@ Anota lo que observes:
 - [ ] Al subir el generador a 0 dBFS, ¿se enciende el LED rojo de saturación en Salida 1 y Entrada 8, y se apaga unos 2 s después de bajarlo?
 - [ ] Al detener el generador en Smaart, ¿los medidores pasan a «—» en menos de medio segundo?
 - [ ] Al cerrar y volver a abrir la app AV Matrix, ¿Smaart sigue recibiendo sin cortes?
+- [ ] Nombres: doble clic sobre «Salida 1» y escribe «Generador rosa» + Enter. ¿Aparece «1 · Generador rosa» arriba y en la descripción de la ruta, con las conexiones y el nivel iguales?
+- [ ] Doble clic sobre «Entrada 8», escribe «Señal de referencia» y pulsa Escape: ¿no cambia? Repite con Enter: ¿conserva el distintivo REFERENCIA LOCAL?
+- [ ] Clic derecho sobre el nombre → «Restaurar nombre original»: ¿vuelve el nombre de fábrica?
+- [ ] Cierra y abre la app: ¿se conservan los nombres con sus tildes?
 
 ## 7. Al terminar
 

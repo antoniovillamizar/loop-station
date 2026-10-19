@@ -17,6 +17,7 @@
 
 #import <Cocoa/Cocoa.h>
 #include "../Client/avm_client.h"
+#include "../Client/avm_names.h"
 
 static const double kRates[3] = { 44100.0, 48000.0, 96000.0 };
 
@@ -41,19 +42,6 @@ static const AVMGroup kRxGroups[] = {
 #define kNumTx ((int)(sizeof(kTxGroups) / sizeof(kTxGroups[0])))
 #define kNumRx ((int)(sizeof(kRxGroups) / sizeof(kRxGroups[0])))
 
-static NSString* TxChannelName(int src)
-{
-    if (src < AVM_SRC_LINK_BASE)  return [NSString stringWithFormat:@"Salida %d", src - AVM_SRC_SMAART_BASE + 1];
-    if (src < AVM_SRC_MUSIC_BASE) return [NSString stringWithFormat:@"Retorno %d", src - AVM_SRC_LINK_BASE + 1];
-    return src == AVM_SRC_MUSIC_BASE ? @"Música L" : @"Música R";
-}
-
-static NSString* RxChannelName(int dst)
-{
-    if (dst < AVM_DST_LINK_BASE) return [NSString stringWithFormat:@"Entrada %d", dst - AVM_DST_SMAART_BASE + 1];
-    return [NSString stringWithFormat:@"Envío %d", dst - AVM_DST_LINK_BASE + 1];
-}
-
 // Convierte un texto C en UTF-8 (nombres de grupos y dispositivos con tildes,
 // p. ej. «Música») a NSString. Nunca usar %s con estos nombres: %s los
 // interpreta con la codificación del sistema y muestra «M√∫sica».
@@ -63,8 +51,70 @@ static NSString* UTF8(const char* s)
     return r ?: @"";
 }
 
-static NSString* SourceLongName(int s) { char b[64]; avm_source_name(s, b, sizeof(b)); return UTF8(b); }
-static NSString* DestLongName(int d)   { char b[64]; avm_dest_name(d, b, sizeof(b));   return UTF8(b); }
+// --- Nombres personalizados (solo visualización) ---------------------------
+// Los alias viven en la app (Application Support) y nunca llegan al driver:
+// no cambian conexiones, numeración interna, niveles ni funcionamiento.
+static avm_names gNames;
+
+static NSString* NamesFilePath(void)
+{
+    NSURL* base = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL* dir = [base URLByAppendingPathComponent:@"AV Matrix" isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    return [dir URLByAppendingPathComponent:@"nombres_canales.txt"].path;
+}
+
+static NSString* ChannelAlias(int idx)   { const char* a = avm_names_get(&gNames, idx); return a ? UTF8(a) : nil; }
+static NSString* ChannelNumber(int idx)  { char b[8]; avm_names_number(idx, b, sizeof(b)); return UTF8(b); }
+static NSString* ChannelDefault(int idx) { char b[64]; avm_names_default(idx, b, sizeof(b)); return UTF8(b); }
+
+// Cabecera vertical de un transmisor: «Salida 3», o «3 · alias» (el número siempre visible).
+static NSString* TxChannelName(int src)
+{
+    int idx = avm_names_src_index(src);
+    NSString* a = ChannelAlias(idx);
+    return a ? [NSString stringWithFormat:@"%@ · %@", ChannelNumber(idx), a] : ChannelDefault(idx);
+}
+
+// Nombre de un receptor junto a su número (el número se dibuja aparte, en su columna).
+static NSString* RxChannelName(int dst)
+{
+    int idx = avm_names_dst_index(dst);
+    return ChannelAlias(idx) ?: ChannelDefault(idx);
+}
+
+// Descripciones de rutas: nombre completo original y, si existe, el alias entre comillas.
+static NSString* SourceLongName(int s)
+{
+    char b[64];
+    avm_source_name(s, b, sizeof(b));
+    NSString* a = ChannelAlias(avm_names_src_index(s));
+    return a ? [NSString stringWithFormat:@"%@ «%@»", UTF8(b), a] : UTF8(b);
+}
+
+static NSString* DestLongName(int d)
+{
+    NSString* a = ChannelAlias(avm_names_dst_index(d));
+    if (d == AVM_DST_LOCAL_REFERENCE)   // el distintivo REFERENCIA LOCAL se conserva siempre
+        return a ? [NSString stringWithFormat:@"Smaart Entrada 8 «%@» (REFERENCIA LOCAL)", a] : @"Smaart Entrada 8 (REFERENCIA LOCAL)";
+    char b[64];
+    avm_dest_name(d, b, sizeof(b));
+    return a ? [NSString stringWithFormat:@"%@ «%@»", UTF8(b), a] : UTF8(b);
+}
+
+// Recorta un texto con «…» para que quepa en `maxW` puntos.
+static NSString* FitString(NSString* s, NSDictionary* attrs, CGFloat maxW)
+{
+    if ([s sizeWithAttributes:attrs].width <= maxW) return s;
+    NSString* t = s;
+    while (t.length > 1) {
+        NSRange r = [t rangeOfComposedCharacterSequenceAtIndex:t.length - 1];
+        t = [t substringToIndex:r.location];
+        NSString* c = [t stringByAppendingString:@"…"];
+        if ([c sizeWithAttributes:attrs].width <= maxW) return c;
+    }
+    return @"…";
+}
 
 // Un carril es una fila o columna visible: la cabecera de un grupo o uno de sus canales.
 typedef struct {
@@ -81,6 +131,9 @@ typedef struct {
 - (void)matrixView:(AVMMatrixView*)view toggleDest:(int)dst source:(int)src;
 - (void)matrixView:(AVMMatrixView*)view hoverInfo:(NSString*)info;
 - (void)matrixViewDidChangeLayout:(AVMMatrixView*)view;
+// Renombrar: idx es el índice de avm_names (fuentes 0-17, destinos 18-33).
+- (void)matrixView:(AVMMatrixView*)view renameChannel:(int)idx anchor:(NSRect)anchor;
+- (void)matrixView:(AVMMatrixView*)view restoreChannelName:(int)idx;
 @end
 
 @interface AVMMatrixView : NSView
@@ -93,17 +146,20 @@ typedef struct {
 
 // Geometría (puntos).
 static const CGFloat kCell = 20.0;      // lado de cada casilla
-static const CGFloat kLeftW = 336.0;    // nombres de los receptores + sus medidores
+static const CGFloat kLeftW = 386.0;    // nombres de los receptores + sus medidores
 static const CGFloat kTopH = 184.0;     // nombres verticales de los transmisores + sus medidores
 static const CGFloat kSumW = 40.0;      // columna de aviso de suma, a la derecha
 
 // Medidores de los receptores (a la derecha del nombre, en cada fila).
-static const CGFloat kRxMeterX = 204.0, kRxMeterW = 64.0;
-static const CGFloat kRxDbX = 272.0, kRxDbW = 44.0;
-static const CGFloat kRxClipX = 320.0;
+static const CGFloat kRxMeterX = 254.0, kRxMeterW = 64.0;
+static const CGFloat kRxDbX = 322.0, kRxDbW = 44.0;
+static const CGFloat kRxClipX = 370.0;
 // Medidores de los transmisores (debajo del nombre vertical, en cada columna).
 static const CGFloat kTxMeterH = 80.0;  // LED + barra + dBFS
 static const CGFloat kTxBarH = 50.0;
+
+// Ancho del distintivo REFERENCIA LOCAL (texto de 9 pt en negrita + márgenes).
+static const CGFloat kRefBadgeW = 104.0;
 
 // Escala de los medidores: de -60 a 0 dBFS.
 static const float kMeterFloorDb = -60.0f;
@@ -356,7 +412,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
             label = [NSString stringWithFormat:@"%@ %@", _txOpen[c.group] ? @"⊟" : @"⊞", UTF8(kTxGroups[c.group].name)];
             attr = groupAttr;
         } else {
-            label = TxChannelName(c.channel);
+            label = FitString(TxChannelName(c.channel), chanAttr, kTopH - kTxMeterH - 10);
             attr = chanAttr;
         }
         [self drawVerticalString:label attributes:attr centerX:cx bottomY:kTopH - kTxMeterH - 4];
@@ -384,7 +440,14 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
             NSString* label = [NSString stringWithFormat:@"%@ %@", _rxOpen[r.group] ? @"⊟" : @"⊞", UTF8(kRxGroups[r.group].name)];
             [label drawAtPoint:NSMakePoint(6, y) withAttributes:groupAttr];
         } else {
-            [RxChannelName(r.channel) drawAtPoint:NSMakePoint(24, y + 1) withAttributes:chanAttr];
+            // Número del canal, siempre visible, y su nombre (original o personalizado).
+            NSDictionary* na = @{ NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular],
+                                  NSForegroundColorAttributeName: [NSColor secondaryLabelColor] };
+            NSString* num = ChannelNumber(avm_names_dst_index(r.channel));
+            [num drawAtPoint:NSMakePoint(20 - [num sizeWithAttributes:na].width, y + 2) withAttributes:na];
+            CGFloat nameMaxW = kRxMeterX - 8 - 24;
+            if (r.channel == AVM_DST_LOCAL_REFERENCE) nameMaxW -= kRefBadgeW + 6;
+            [FitString(RxChannelName(r.channel), chanAttr, nameMaxW) drawAtPoint:NSMakePoint(24, y + 1) withAttributes:chanAttr];
 
             // Medidor del destino (señal entregada, después de la matriz).
             avm_meter_reading mr = _dstM[r.channel];
@@ -400,7 +463,8 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
                 NSString* badge = @"REFERENCIA LOCAL";
                 NSDictionary* ba = @{ NSFontAttributeName: [NSFont boldSystemFontOfSize:9], NSForegroundColorAttributeName: [NSColor whiteColor] };
                 NSSize bs = [badge sizeWithAttributes:ba];
-                NSRect br = NSMakeRect(86, y + 1, bs.width + 10, kCell - 6);
+                // Distintivo fijo a la derecha del nombre: se conserva con cualquier alias.
+                NSRect br = NSMakeRect(kRxMeterX - 8 - kRefBadgeW, y + 1, bs.width + 10, kCell - 6);
                 [[NSColor systemOrangeColor] setFill];
                 [[NSBezierPath bezierPathWithRoundedRect:br xRadius:4 yRadius:4] fill];
                 [badge drawAtPoint:NSMakePoint(br.origin.x + 5, br.origin.y + (br.size.height - bs.height) / 2.0) withAttributes:ba];
@@ -535,10 +599,58 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     [self.delegate matrixView:self hoverInfo:@""];
 }
 
+// Índice de avm_names si `p` está sobre el nombre de un canal (no de un grupo); si no, -1.
+- (int)channelNameIndexAt:(NSPoint)p
+{
+    int ri = [self rowAtY:p.y], ci = [self colAtX:p.x];
+    if (ri >= 0 && p.x < kRxMeterX - 4 && _rows[ri].channel >= 0) return avm_names_dst_index(_rows[ri].channel);
+    if (ci >= 0 && p.y < kTopH - kTxMeterH && _cols[ci].channel >= 0) return avm_names_src_index(_cols[ci].channel);
+    return -1;
+}
+
+- (NSRect)nameRectForIndex:(int)idx at:(NSPoint)p
+{
+    if (idx >= AVM_NUM_SOURCES) {
+        int ri = [self rowAtY:p.y];
+        return NSMakeRect(24, kTopH + ri * kCell, kRxMeterX - 32, kCell);
+    }
+    int ci = [self colAtX:p.x];
+    return NSMakeRect(kLeftW + ci * kCell, 0, kCell, kTopH - kTxMeterH);
+}
+
+// Menú contextual sobre el nombre de un canal.
+- (NSMenu*)menuForEvent:(NSEvent*)e
+{
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    int idx = [self channelNameIndexAt:p];
+    if (idx < 0) return nil;
+    NSMenu* m = [[NSMenu alloc] initWithTitle:@""];
+    NSMenuItem* rename = [m addItemWithTitle:@"Cambiar nombre…" action:@selector(menuRename:) keyEquivalent:@""];
+    rename.target = self;
+    rename.tag = idx;
+    rename.representedObject = [NSValue valueWithRect:[self nameRectForIndex:idx at:p]];
+    NSMenuItem* restore = [m addItemWithTitle:@"Restaurar nombre original" action:@selector(menuRestore:) keyEquivalent:@""];
+    restore.target = self;
+    restore.tag = idx;
+    restore.enabled = avm_names_get(&gNames, idx) != NULL;
+    m.autoenablesItems = NO;
+    return m;
+}
+
+- (void)menuRename:(NSMenuItem*)item  { [self.delegate matrixView:self renameChannel:(int)item.tag anchor:[item.representedObject rectValue]]; }
+- (void)menuRestore:(NSMenuItem*)item { [self.delegate matrixView:self restoreChannelName:(int)item.tag]; }
+
 - (void)mouseDown:(NSEvent*)e
 {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     int ri = [self rowAtY:p.y], ci = [self colAtX:p.x];
+
+    // Doble clic sobre el nombre de un canal: cambiar su nombre.
+    int renameIdx = [self channelNameIndexAt:p];
+    if (e.clickCount == 2 && renameIdx >= 0) {
+        [self.delegate matrixView:self renameChannel:renameIdx anchor:[self nameRectForIndex:renameIdx at:p]];
+        return;
+    }
 
     // Clic en el nombre de un grupo receptor (izquierda) o transmisor (arriba): plegar/desplegar.
     if (p.x < kLeftW && ri >= 0) {
@@ -571,6 +683,142 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
 @end
 
 // ---------------------------------------------------------------------------
+#pragma mark Cambio de nombre de un canal
+
+// Panel de edición: Enter guarda, Escape (o clic fuera) cancela, «Restaurar
+// nombre original» quita el alias. Solo cambia el texto mostrado por la app.
+@interface AVMRenameController : NSViewController <NSTextFieldDelegate, NSPopoverDelegate>
+@property (assign) int index;
+@property (strong) NSPopover* popover;
+@property (strong) NSTextField* field;
+@property (strong) NSTextField* errorLabel;
+@property (copy) void (^onChange)(void);
+@end
+
+@implementation AVMRenameController
+
+- (instancetype)initWithIndex:(int)idx
+{
+    if ((self = [super initWithNibName:nil bundle:nil])) _index = idx;
+    return self;
+}
+
+- (void)loadView
+{
+    NSString* key = UTF8(avm_names_key(self.index));
+    NSString* original = ChannelDefault(self.index);
+    NSString* full = self.index < AVM_NUM_SOURCES ? SourceLongName(self.index) : DestLongName(self.index - AVM_NUM_SOURCES);
+
+    NSTextField* title = [NSTextField labelWithString:[NSString stringWithFormat:@"Nombre del canal %@ — %@", ChannelNumber(self.index), full]];
+    title.font = [NSFont boldSystemFontOfSize:12];
+    title.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    NSTextField* sub = [NSTextField labelWithString:[NSString stringWithFormat:@"Original: «%@» · identificador: %@", original, key]];
+    sub.font = [NSFont systemFontOfSize:10];
+    sub.textColor = [NSColor secondaryLabelColor];
+
+    self.field = [NSTextField textFieldWithString:ChannelAlias(self.index) ?: original];
+    self.field.placeholderString = original;
+    self.field.delegate = self;
+    [self.field.widthAnchor constraintGreaterThanOrEqualToConstant:280].active = YES;
+
+    self.errorLabel = [NSTextField labelWithString:@""];
+    self.errorLabel.font = [NSFont systemFontOfSize:10];
+    self.errorLabel.textColor = [NSColor systemRedColor];
+    self.errorLabel.hidden = YES;
+
+    NSTextField* help = [NSTextField labelWithString:[NSString stringWithFormat:@"Enter guarda · Esc cancela · vacío = nombre original · máximo %d caracteres", AVM_ALIAS_MAX_CHARS]];
+    help.font = [NSFont systemFontOfSize:10];
+    help.textColor = [NSColor tertiaryLabelColor];
+
+    NSButton* restore = [NSButton buttonWithTitle:@"Restaurar nombre original" target:self action:@selector(restore:)];
+    restore.enabled = avm_names_get(&gNames, self.index) != NULL;
+    NSButton* cancel = [NSButton buttonWithTitle:@"Cancelar" target:self action:@selector(cancel:)];
+    NSButton* save = [NSButton buttonWithTitle:@"Guardar" target:self action:@selector(save:)];
+    save.keyEquivalent = @"\r";
+    NSStackView* buttons = [NSStackView stackViewWithViews:@[ restore, [NSView new], cancel, save ]];
+    buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+
+    NSStackView* v = [NSStackView stackViewWithViews:@[ title, sub, self.field, self.errorLabel, help, buttons ]];
+    v.orientation = NSUserInterfaceLayoutOrientationVertical;
+    v.alignment = NSLayoutAttributeLeading;
+    v.spacing = 6;
+    v.edgeInsets = NSEdgeInsetsMake(12, 12, 12, 12);
+    self.view = v;
+}
+
+- (void)viewDidAppear
+{
+    [super viewDidAppear];
+    [self.view.window makeFirstResponder:self.field];
+    [self.field selectText:nil];
+}
+
+// Enter y Escape dentro del campo.
+- (BOOL)control:(NSControl*)c textView:(NSTextView*)tv doCommandBySelector:(SEL)sel
+{
+    (void)c; (void)tv;
+    if (sel == @selector(insertNewline:)) { [self save:nil]; return YES; }
+    if (sel == @selector(cancelOperation:)) { [self cancel:nil]; return YES; }
+    return NO;
+}
+
+- (void)cancelOperation:(id)sender { [self cancel:sender]; }
+
+- (void)cancel:(id)sender
+{
+    (void)sender;
+    [self.popover performClose:nil];   // sin cambios
+}
+
+// Aplica un cambio y lo guarda; si no se puede guardar, se revierte.
+- (BOOL)commit:(void (^)(void))change
+{
+    avm_names previous = gNames;
+    change();
+    if (!avm_names_save(&gNames, NamesFilePath().fileSystemRepresentation)) {
+        gNames = previous;
+        self.errorLabel.stringValue = @"No se pudo guardar el nombre en disco; no se ha cambiado.";
+        self.errorLabel.hidden = NO;
+        return NO;
+    }
+    if (self.onChange) self.onChange();
+    [self.popover performClose:nil];
+    return YES;
+}
+
+- (void)save:(id)sender
+{
+    (void)sender;
+    // Forma compuesta (NFC): «é» como un solo carácter, igual en pantalla y en disco.
+    NSString* text = [self.field.stringValue precomposedStringWithCanonicalMapping];
+    const char* utf8 = text.UTF8String ?: "";
+    char clean[AVM_ALIAS_MAX_BYTES + 1];
+    avm_name_status st = avm_names_normalize(utf8, clean, sizeof(clean));
+    if (st == AVM_NAME_TOO_LONG) {
+        self.errorLabel.stringValue = [NSString stringWithFormat:@"El nombre tiene más de %d caracteres.", AVM_ALIAS_MAX_CHARS];
+        self.errorLabel.hidden = NO;
+        return;
+    }
+    if (st == AVM_NAME_INVALID_UTF8) {
+        self.errorLabel.stringValue = @"El texto contiene caracteres no válidos.";
+        self.errorLabel.hidden = NO;
+        return;
+    }
+    int idx = self.index;
+    const char* cleanp = clean;   // el bloque se ejecuta de forma síncrona dentro de commit:
+    [self commit:^{ avm_names_set(&gNames, idx, cleanp); }];
+}
+
+- (void)restore:(id)sender
+{
+    (void)sender;
+    int idx = self.index;
+    [self commit:^{ avm_names_restore(&gNames, idx); }];
+}
+
+@end
+
+// ---------------------------------------------------------------------------
 #pragma mark Controlador
 
 @interface AVMController : NSObject <NSApplicationDelegate, NSWindowDelegate, AVMMatrixViewDelegate>
@@ -586,6 +834,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
 @property (strong) NSStackView* root;
 @property (assign) BOOL listening;
 @property (strong) NSTimer* meterTimer;
+@property (strong) AVMRenameController* renamer;
 @end
 
 static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
@@ -600,6 +849,7 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 - (void)applicationDidFinishLaunching:(NSNotification*)note
 {
     (void)note;
+    [self loadNames];
     [self buildMenu];
     [self buildWindow];
     [self reload];
@@ -859,6 +1109,54 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 {
     (void)view;
     self.infoLabel.stringValue = info.length ? info : @" ";
+}
+
+// --- Nombres de los canales
+
+- (void)loadNames
+{
+    NSString* path = NamesFilePath();
+    if (!avm_names_load(&gNames, path.fileSystemRepresentation)) {
+        // Archivo ilegible: se aparta (no se pierde) y se usan los nombres originales.
+        NSString* aside = [path stringByAppendingFormat:@".dañado-%ld", (long)[NSDate date].timeIntervalSince1970];
+        [[NSFileManager defaultManager] moveItemAtPath:path toPath:aside error:NULL];
+        NSLog(@"AV Matrix: no se pudo leer %@; se apartó como %@", path, aside);
+        avm_names_init(&gNames);
+    }
+}
+
+- (void)matrixView:(AVMMatrixView*)view renameChannel:(int)idx anchor:(NSRect)anchor
+{
+    if (idx < 0 || idx >= AVM_NAMES_COUNT) return;
+    [self.renamer.popover close];
+    AVMRenameController* rc = [[AVMRenameController alloc] initWithIndex:idx];
+    __weak AVMController* weakSelf = self;
+    rc.onChange = ^{ [weakSelf namesChanged]; };
+    NSPopover* pop = [[NSPopover alloc] init];
+    pop.contentViewController = rc;
+    pop.behavior = NSPopoverBehaviorTransient;   // clic fuera = cancelar
+    rc.popover = pop;
+    self.renamer = rc;
+    [pop showRelativeToRect:anchor ofView:view preferredEdge:(idx >= AVM_NUM_SOURCES ? NSRectEdgeMaxX : NSRectEdgeMaxY)];
+}
+
+- (void)matrixView:(AVMMatrixView*)view restoreChannelName:(int)idx
+{
+    (void)view;
+    avm_names previous = gNames;
+    avm_names_restore(&gNames, idx);
+    if (!avm_names_save(&gNames, NamesFilePath().fileSystemRepresentation)) {
+        gNames = previous;
+        [self showError:@"No se pudo guardar el cambio de nombre en disco."];
+        return;
+    }
+    [self namesChanged];
+}
+
+- (void)namesChanged
+{
+    [self.matrixView setNeedsDisplay:YES];
+    self.infoLabel.stringValue = @" ";
 }
 
 - (void)matrixViewDidChangeLayout:(AVMMatrixView*)view
