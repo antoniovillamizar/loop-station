@@ -192,8 +192,9 @@ void avm_source_name(int src, char* buf, size_t len)
 
 void avm_dest_name(int dst, char* buf, size_t len)
 {
-    if (dst < AVM_DST_LINK_BASE) snprintf(buf, len, "Smaart Entrada %d", dst - AVM_DST_SMAART_BASE + 1);
-    else                         snprintf(buf, len, "LISTENTO Envío %d", dst - AVM_DST_LINK_BASE + 1);
+    if (dst == AVM_DST_LOCAL_REFERENCE) snprintf(buf, len, "Smaart Entrada 8 (REFERENCIA LOCAL)");
+    else if (dst < AVM_DST_LINK_BASE)   snprintf(buf, len, "Smaart Entrada %d", dst - AVM_DST_SMAART_BASE + 1);
+    else                                snprintf(buf, len, "LISTENTO Envío %d", dst - AVM_DST_LINK_BASE + 1);
 }
 
 void avm_source_token(int src, char* buf, size_t len)

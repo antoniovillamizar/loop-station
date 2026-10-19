@@ -74,13 +74,21 @@ void avm_matrix_clear(avm_matrix* m)
     memset(m, 0, sizeof(*m));
 }
 
-void avm_matrix_default(avm_matrix* m)
+void avm_matrix_direct(avm_matrix* m)
 {
     avm_matrix_clear(m);
     for (int i = 0; i < AVM_CHANNELS_PER_PORT; i++) {
         m->cell[AVM_DST_LINK_BASE + i][AVM_SRC_SMAART_BASE + i] = 1;  // envío a Colombia
         m->cell[AVM_DST_SMAART_BASE + i][AVM_SRC_LINK_BASE + i] = 1;  // retorno a Smaart
     }
+}
+
+void avm_matrix_default(avm_matrix* m)
+{
+    avm_matrix_direct(m);
+    // Entrada 8 = referencia local: solo el generador, sin mezclar el retorno 8.
+    m->cell[AVM_DST_LOCAL_REFERENCE][AVM_SRC_LINK_BASE + 7] = 0;
+    m->cell[AVM_DST_LOCAL_REFERENCE][AVM_SRC_GENERATOR] = 1;
 }
 
 bool avm_matrix_is_valid(const avm_matrix* m)

@@ -1,8 +1,59 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisión 2; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 y 3; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 2 — correcciones pedidas por Codex sobre `9d17362`
+## 0. Revisión 3 — matriz tipo Dante y referencia local (sobre `0e7c9e8`)
+
+Petición de Antonio: organizar la matriz como Dante Controller / Dante Preset Creator, con la Entrada 8 como **REFERENCIA LOCAL**. Se conservan el controlador y todas las funciones. Antes de modificar se hizo una copia de seguridad del proyecto en `0e7c9e8`. **No se instaló nada ni se reinició coreaudiod.**
+
+**Nota:** las capturas de Dante que se mencionan no llegaron a esta sesión. La organización sigue la convención estándar de Dante: transmisores arriba con nombres verticales, receptores a la izquierda, una columna o fila de cabecera por dispositivo con ⊟/⊞, y casillas verdes con ✓.
+
+### 0.α Nueva pantalla principal (`App/AVMatrixApp.m`)
+
+- La rejilla de `NSButton` se sustituye por una vista propia, `AVMMatrixView`, que dibuja la matriz completa con casillas de 20 pt.
+  - **Transmisores arriba**, con nombres verticales: Smaart Salida 1-8, LISTENTO Retorno 1-8, Música L/R.
+  - **Receptores a la izquierda:** Smaart Entrada 1-8, LISTENTO Envío 1-8.
+  - Cada grupo tiene una cabecera plegable (⊟/⊞) y el estado se recuerda en `NSUserDefaults`.
+- **Casillas:** verde con ✓ = conectada; vacía = desconectada; gris con × = bloqueada (lazo).
+- **Cabeceras y grupos plegados:** un punto verde indica que hay conexiones dentro. Al pulsarlo se despliega; nunca modifica conexiones.
+- **Entrada 8:** etiqueta naranja «REFERENCIA LOCAL» y fila resaltada.
+- **Ratón:** resalta la fila y la columna y muestra abajo la ruta completa y su estado.
+- **Σ n** en naranja si una fila suma varias fuentes.
+- **Sin espacio vacío:** la ventana se ajusta al tamaño de la matriz (`fitWindow`) y se reajusta al plegar o desplegar. Por encima del tamaño de la pantalla, aparecen barras de desplazamiento.
+- **Barra superior compacta:** frecuencia, «Preset medición», «Directo 8×8», «Vaciar», «Desplegar todo», «Plegar todo», «Recargar» y «Reparar frecuencia» (solo si hay inconsistencia).
+- **Funciones conservadas:** escucha de `'mtrx'`, `'rsta'` y frecuencia; reparación de frecuencia; mensajes de rechazo.
+- El clic en una casilla bloqueada solo emite un pitido y una explicación; el driver sigue rechazando los lazos.
+
+### 0.β Preset de medición con referencia local (`Driver/src/avm_core.c`)
+
+- `avm_matrix_default` (preset inicial del driver) pasa a ser el **preset de medición**:
+  - Smaart Salida N → LISTENTO Envío N (1-8);
+  - LISTENTO Retorno N → Smaart Entrada N (1-7);
+  - **Smaart Salida 1 → Smaart Entrada 8**, **sin** el retorno 8 de LISTENTO.
+- El preset anterior se conserva como `avm_matrix_direct` («Directo 8×8», `avmctl preset direct`).
+- Constantes nuevas: `AVM_DST_LOCAL_REFERENCE` (Smaart Entrada 8) y `AVM_SRC_GENERATOR` (Smaart Salida 1).
+- **Nombres:**
+  - Driver: Smaart ve el canal 8 de entrada como «Entrada 8 (referencia local)» (nombre del elemento HAL).
+  - `avm_dest_name`: «Smaart Entrada 8 (REFERENCIA LOCAL)».
+  - `avmctl show` ensancha la columna de nombres.
+- Las matrices guardadas en un Mac donde ya esté instalado se respetan; el preset solo se aplica si no hay matriz guardada o al pulsarlo.
+
+### 0.γ Pruebas
+
+| Prueba | Resultado |
+| --- | --- |
+| `test_core.c`: el aislamiento con el preset predeterminado ahora exige Entradas 1-7 = Retornos 1-7, **Entrada 8 = solo Smaart Salida 1** y Envíos = Salidas. Nueva `test_measurement_preset_cells`: una sola fuente en la referencia, sin el retorno 8, sin música, y el preset directo conserva el 8×8. `test_stale_data` fija explícitamente el preset directo, que es el que comprueba | **122/122** |
+| `test_rate.c`, `test_install.sh`, `test_build_script.sh` | 115/115, 57/57, 7/7 |
+| ASan/UBSan, TSan | Sin avisos |
+| App (AppKit, ARC), driver y `avmctl`: compilación cruzada contra el SDK 15.5, arm64 + x86_64, `-Wall -Wextra -Werror` | Sin avisos |
+| **Maqueta visual**: HTML con la misma geometría que `AVMMatrixView` (20 pt por casilla, 200 pt de nombres, 104 pt de cabecera), renderizado con Chromium | Imagen `AVMatrix_maqueta_matriz.png`, entregada aparte. **No es una captura del Mac** |
+
+### 0.δ Pendiente en el Mac
+
+- Ver la vista real de AppKit: el giro de los textos verticales, los colores en modo claro y oscuro, el ajuste de la ventana y el resaltado del ratón. Nada de eso se puede ejecutar en Linux.
+- Confirmar con Antonio que la organización coincide con la de sus capturas de Dante.
+
+## 0ter. Revisión 2 — correcciones pedidas por Codex sobre `9d17362`
 
 Se conservan todas las correcciones de la revisión 1. Antes de modificar se hizo una copia de seguridad del proyecto en `9d17362` (tarball en el directorio temporal de la sesión; el commit también la conserva). **No se instaló nada ni se reinició coreaudiod.**
 

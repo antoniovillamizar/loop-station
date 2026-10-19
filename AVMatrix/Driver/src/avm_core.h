@@ -53,6 +53,11 @@ typedef enum {
 #define AVM_DST_LINK_BASE      8
 #define AVM_NUM_DESTS          16
 
+// Entrada 8 de Smaart: REFERENCIA LOCAL en el preset de medición.
+// Recibe solo Smaart Salida 1 (el generador), nunca el retorno 8 de LISTENTO.
+#define AVM_DST_LOCAL_REFERENCE (AVM_DST_SMAART_BASE + 7)
+#define AVM_SRC_GENERATOR       (AVM_SRC_SMAART_BASE + 0)
+
 // Formatos de muestra físicos que admite cada stream.
 typedef enum {
     AVM_FMT_FLOAT32 = 0,  // 32 bits coma flotante (formato interno, sin conversión)
@@ -118,8 +123,14 @@ avm_src_group avm_src_group_of(int src);
 // --- Reglas de la matriz ---------------------------------------------------
 avm_route_status avm_route_allowed(int dst, int src);
 void avm_matrix_clear(avm_matrix* m);
-// Preset: Smaart salida N -> LISTENTO entrada N; LISTENTO salida N -> Smaart entrada N.
+// Preset de medición (predeterminado del driver):
+//   Smaart Salida N   -> LISTENTO Envío N      (N = 1..8, hacia Colombia)
+//   LISTENTO Retorno N -> Smaart Entrada N     (N = 1..7, retornos medidos)
+//   Smaart Salida 1   -> Smaart Entrada 8      (REFERENCIA LOCAL, sin el retorno 8)
 void avm_matrix_default(avm_matrix* m);
+// Preset directo 8x8: Smaart Salida N -> LISTENTO Envío N y LISTENTO Retorno N ->
+// Smaart Entrada N para N = 1..8 (sin referencia local).
+void avm_matrix_direct(avm_matrix* m);
 // Devuelve true si la matriz no contiene cruces prohibidos ni valores distintos de 0/1.
 bool avm_matrix_is_valid(const avm_matrix* m);
 

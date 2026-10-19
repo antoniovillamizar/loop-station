@@ -61,33 +61,31 @@ avmctl test
 
 ## 6. Prueba en Smaart: enviar y recibir a la vez
 
-1. Prepara un bucle interno, solo para esta prueba (Salida 1 → Entrada 1):
+1. Carga el preset de medición:
    ```bash
-   avmctl preset clear
-   avmctl connect smaart.out.1 smaart.in.1
+   avmctl preset default
    avmctl show
    ```
-2. Abre **Smaart**. Si pide permiso de micrófono, acéptalo.
-3. En la configuración de audio de Smaart (I/O Config), elige **AV Matrix Smaart** como dispositivo de **entrada** y de **salida**.
-4. Generador: **ruido rosa** por la **Salida 1** de AV Matrix Smaart. Empieza con un nivel bajo.
-5. Medición: la **Entrada 1** de AV Matrix Smaart. Debe verse el ruido rosa en el medidor y en el espectro.
-6. Opcional: función de transferencia con referencia = Entrada 1 y medición = Entrada 1. Debe salir plana y coherente; sirve para ver que la señal llega intacta.
+   Smaart Salida 1 llega a **Smaart Entrada 8 (REFERENCIA LOCAL)**. Las entradas 1-7 esperan los retornos de LISTENTO; con LISTENTO cerrado quedan en silencio.
+2. Abre la app **AV Matrix** (en Aplicaciones). Comprueba en la matriz la casilla verde ✓ en el cruce de la columna **Smaart → Salida 1** con la fila **Smaart → Entrada 8 · REFERENCIA LOCAL**.
+3. Abre **Smaart**. Si pide permiso de micrófono, acéptalo.
+4. En la configuración de audio de Smaart (I/O Config), elige **AV Matrix Smaart** como dispositivo de **entrada** y de **salida**. El canal 8 debe aparecer como «Entrada 8 (referencia local)».
+5. Generador: **ruido rosa** por la **Salida 1** de AV Matrix Smaart. Empieza con un nivel bajo.
+6. Mira la **Entrada 8**: debe verse el ruido rosa en el medidor y en el espectro.
+7. Opcional: función de transferencia con referencia = Entrada 8 y medición = Entrada 8. Debe salir plana y coherente.
 
 Anota lo que observes:
 
 - [ ] ¿Aparece «AV Matrix Smaart» en la lista de dispositivos de Smaart?
 - [ ] ¿Se puede elegir como entrada y como salida a la vez?
-- [ ] ¿El ruido rosa enviado por la Salida 1 llega a la Entrada 1?
-- [ ] ¿Las Entradas 2-8 quedan en silencio?
+- [ ] ¿El ruido rosa enviado por la Salida 1 llega a la Entrada 8?
+- [ ] ¿Las Entradas 1-7 quedan en silencio?
 - [ ] ¿Hay cortes o chasquidos?
+- [ ] ¿La matriz de la app se entiende como la de Dante?
 
 ## 7. Al terminar
 
-Vuelve a la configuración normal (Smaart → LISTENTO y LISTENTO → Smaart):
-```bash
-avmctl preset default
-```
-También puedes abrir la app **AV Matrix** (en Aplicaciones) para ver y cambiar la matriz.
+La configuración queda en el preset de medición, que es la que se usará con LISTENTO más adelante. No hace falta cambiar nada.
 
 ## Desinstalar
 

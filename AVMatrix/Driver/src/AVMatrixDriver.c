@@ -898,6 +898,8 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
             char buf[64];
             if (d->srcGroup == AVM_SRC_GROUP_MUSIC)
                 snprintf(buf, sizeof(buf), "%s", a->mElement == 1 ? "Música L" : "Música R");
+            else if (d->device == kObj_Dev_Smaart && a->mScope == kAudioObjectPropertyScopeInput && a->mElement == 8)
+                snprintf(buf, sizeof(buf), "Entrada 8 (referencia local)");  // así la ve Smaart
             else
                 snprintf(buf, sizeof(buf), pattern, (unsigned)a->mElement);
             *((CFStringRef*)outData) = AVM_CopyCFString(buf);

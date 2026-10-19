@@ -44,7 +44,7 @@ static void test_rules(void)
 {
     avm_matrix m;
     avm_matrix_default(&m);
-    CHECK(avm_matrix_is_valid(&m), "el preset predeterminado debe ser válido");
+    CHECK(avm_matrix_is_valid(&m), "el preset predeterminado (medición) debe ser válido");
 
     for (int d = AVM_DST_LINK_BASE; d < AVM_DST_LINK_BASE + 8; d++)
         for (int s = AVM_SRC_LINK_BASE; s < AVM_SRC_LINK_BASE + 8; s++)
@@ -76,15 +76,38 @@ static void test_isolation_default(void)
     avm_engine_read(e, AVM_DST_GROUP_SMAART, 1000, N, smaart_in, AVM_FMT_FLOAT32, 8);
     avm_engine_read(e, AVM_DST_GROUP_LINK, 1000, N, link_in, AVM_FMT_FLOAT32, 8);
 
-    int ok_s = 1, ok_l = 1;
+    int ok_s = 1, ok_ref = 1, ok_l = 1;
     for (uint32_t f = 0; f < N; f++)
         for (int c = 0; c < 8; c++) {
-            if (smaart_in[f * 8 + c] != src_value(AVM_SRC_LINK_BASE + c)) ok_s = 0;
+            if (c < 7 && smaart_in[f * 8 + c] != src_value(AVM_SRC_LINK_BASE + c)) ok_s = 0;
+            if (c == 7 && smaart_in[f * 8 + c] != src_value(AVM_SRC_GENERATOR)) ok_ref = 0;
             if (link_in[f * 8 + c] != src_value(AVM_SRC_SMAART_BASE + c)) ok_l = 0;
         }
-    CHECK(ok_s, "entrada Smaart N debe contener exactamente el retorno LISTENTO N y nada más");
-    CHECK(ok_l, "envío LISTENTO N debe contener exactamente la salida Smaart N y nada más");
+    CHECK(ok_s, "preset de medición: entrada Smaart N (1-7) contiene exactamente el retorno LISTENTO N");
+    CHECK(ok_ref, "preset de medición: Entrada 8 (referencia local) = solo Smaart Salida 1, sin el retorno 8");
+    CHECK(ok_l, "preset de medición: envío LISTENTO N contiene exactamente la salida Smaart N");
     free(e);
+}
+
+static void test_measurement_preset_cells(void)
+{
+    avm_matrix m;
+    avm_matrix_default(&m);
+    CHECK(avm_matrix_is_valid(&m), "el preset de medición es válido");
+    CHECK(m.cell[AVM_DST_LOCAL_REFERENCE][AVM_SRC_GENERATOR] == 1, "Smaart Salida 1 -> Smaart Entrada 8");
+    CHECK(m.cell[AVM_DST_LOCAL_REFERENCE][AVM_SRC_LINK_BASE + 7] == 0, "el retorno 8 de LISTENTO no entra en la referencia local");
+    int n = 0;
+    for (int s = 0; s < AVM_NUM_SOURCES; s++) n += m.cell[AVM_DST_LOCAL_REFERENCE][s];
+    CHECK(n == 1, "la referencia local tiene una sola fuente (%d)", n);
+    for (int s = AVM_SRC_MUSIC_BASE; s < AVM_NUM_SOURCES; s++)
+        for (int d = 0; d < AVM_NUM_DESTS; d++)
+            if (m.cell[d][s]) { CHECK(0, "la música no se conecta en el preset"); return; }
+
+    avm_matrix direct;
+    avm_matrix_direct(&direct);
+    CHECK(avm_matrix_is_valid(&direct), "el preset directo es válido");
+    CHECK(direct.cell[AVM_DST_LOCAL_REFERENCE][AVM_SRC_LINK_BASE + 7] == 1 && direct.cell[AVM_DST_LOCAL_REFERENCE][AVM_SRC_GENERATOR] == 0,
+          "el preset directo lleva el retorno 8 a la entrada 8, sin referencia");
 }
 
 static void test_clear_is_silence(void)
@@ -149,6 +172,9 @@ static void test_forbidden_ignored_even_if_forced(void)
 static void test_stale_data(void)
 {
     avm_engine* e = new_engine();
+    avm_matrix direct;
+    avm_matrix_direct(&direct);  // las 8 entradas de Smaart reciben los 8 retornos
+    avm_engine_set_matrix(e, &direct);
     write_constant_sources(e, 0, 512);
     float buf[256 * 8];
 
@@ -493,6 +519,7 @@ int main(void)
 {
     test_rules();
     test_isolation_default();
+    test_measurement_preset_cells();
     test_clear_is_silence();
     test_single_route_and_sum();
     test_forbidden_ignored_even_if_forced();

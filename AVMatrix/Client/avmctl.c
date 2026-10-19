@@ -4,7 +4,7 @@
 //   avmctl show                        matriz actual
 //   avmctl connect <fuente> <destino>  p. ej. avmctl connect smaart.out.1 listento.in.1
 //   avmctl disconnect <fuente> <destino>
-//   avmctl preset default|clear
+//   avmctl preset default|direct|clear  (default = medición con referencia local en Entrada 8)
 //   avmctl rate 44100|48000|96000
 //   avmctl recover                     reaplica la frecuencia actual en los tres dispositivos
 //   avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>
@@ -84,7 +84,7 @@ static int cmd_show(void)
     OSStatus err = avm_get_matrix(&m);
     if (err) { print_err("leer matriz", err); return 1; }
 
-    printf("%-20s", "destino \\ fuente");
+    printf("%-38s", "destino \\ fuente");
     for (int s = 0; s < AVM_NUM_SOURCES; s++) {
         if (s < AVM_SRC_LINK_BASE) printf(" S%d", s + 1);
         else if (s < AVM_SRC_MUSIC_BASE) printf(" L%d", s - AVM_SRC_LINK_BASE + 1);
@@ -94,7 +94,7 @@ static int cmd_show(void)
     for (int d = 0; d < AVM_NUM_DESTS; d++) {
         char name[48];
         avm_dest_name(d, name, sizeof(name));
-        printf("%-20s", name);
+        printf("%-38s", name);
         int n = 0;
         for (int s = 0; s < AVM_NUM_SOURCES; s++) {
             const char* c = m.cell[d][s] ? "●" : (avm_route_allowed(d, s) == AVM_ROUTE_OK ? "·" : "×");
@@ -129,9 +129,10 @@ static int cmd_connect(const char* src_t, const char* dst_t, int value)
 static int cmd_preset(const char* which)
 {
     avm_matrix m;
-    if (strcasecmp(which, "default") == 0) avm_matrix_default(&m);
+    if (strcasecmp(which, "default") == 0 || strcasecmp(which, "measure") == 0) avm_matrix_default(&m);
+    else if (strcasecmp(which, "direct") == 0) avm_matrix_direct(&m);
     else if (strcasecmp(which, "clear") == 0) avm_matrix_clear(&m);
-    else { fprintf(stderr, "Preset desconocido: %s (default | clear)\n", which); return 2; }
+    else { fprintf(stderr, "Preset desconocido: %s (default | direct | clear)\n", which); return 2; }
     OSStatus err = avm_set_matrix(&m);
     if (err) { print_err("escribir matriz", err); return 1; }
     return cmd_show();
@@ -472,7 +473,7 @@ static void usage(void)
            "  avmctl show\n"
            "  avmctl connect <fuente> <destino>\n"
            "  avmctl disconnect <fuente> <destino>\n"
-           "  avmctl preset default|clear\n"
+           "  avmctl preset default|direct|clear   (default = medición, Entrada 8 = referencia local)\n"
            "  avmctl rate 44100|48000|96000\n"
            "  avmctl recover\n"
            "  avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>\n"

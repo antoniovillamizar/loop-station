@@ -24,32 +24,35 @@ Los canales de entrada son **entradas de línea genéricas**: no se declaran com
 
 ## 2. La matriz
 
-Fuentes (columnas, 18):
+La app **AV Matrix** muestra la matriz como pantalla principal, con la organización de Dante Controller y Dante Preset Creator:
 
-- **Smaart salida 1-8**: lo que Smaart envía, por ejemplo el ruido rosa.
-- **LISTENTO retorno 1-8**: lo que LISTENTO recibe de Colombia.
-- **Música L/R**: lo que se reproduce en «AV Matrix Música».
-
-Destinos (filas, 16):
-
-- **Smaart entrada 1-8**: lo que Smaart recibe.
-- **LISTENTO envío 1-8**: lo que LISTENTO manda a Colombia.
+- **Arriba, los transmisores (fuentes)**, con nombres verticales y agrupados. Cada grupo tiene una columna de cabecera con ⊟/⊞ para plegarlo o desplegarlo:
+  - **Smaart**: Salida 1-8 (lo que Smaart envía, por ejemplo el ruido rosa).
+  - **LISTENTO**: Retorno 1-8 (lo que LISTENTO recibe de Colombia).
+  - **Música**: L/R (lo que se reproduce en «AV Matrix Música»).
+- **A la izquierda, los receptores (destinos)**, agrupados y desplegables:
+  - **Smaart**: Entrada 1-8 (lo que Smaart recibe). **Entrada 8 = REFERENCIA LOCAL**, con etiqueta naranja.
+  - **LISTENTO**: Envío 1-8 (lo que LISTENTO manda a Colombia).
+- **Casilla verde con ✓** = conexión activa. **Casilla vacía** = desconectada. **Casilla gris con ×** = bloqueada.
+- Un punto verde en una cabecera o en un grupo plegado indica que hay conexiones dentro. Al hacer clic se despliega; nunca cambia conexiones.
+- Al pasar el ratón se resaltan la fila y la columna, y abajo se lee la ruta completa (por ejemplo «Smaart Salida 1 → Smaart Entrada 8 (REFERENCIA LOCAL): conectado»).
+- La ventana se ajusta al tamaño de la matriz, y el estado plegado o desplegado de cada grupo se recuerda.
 
 Cada casilla conecta una fuente con un destino a **ganancia unidad** (0 dB). No hay ganancias variables.
 
-- Si una fila tiene varias casillas marcadas, **suma** esas fuentes. La app lo avisa en naranja.
-- **Bloqueado siempre:** *LISTENTO retorno → LISTENTO envío*. Formaría un lazo de realimentación a través de Colombia. La app muestra esas casillas en gris y el driver rechaza cualquier matriz que las contenga.
-- **Preset predeterminado:** Smaart salida N → LISTENTO envío N, y LISTENTO retorno N → Smaart entrada N. La música queda sin conectar hasta que se asigne.
+- Si una fila tiene varias casillas marcadas, **suma** esas fuentes. La app lo indica con **Σ n** en naranja a la derecha de la fila.
+- **Bloqueado siempre:** *LISTENTO retorno → LISTENTO envío*. Formaría un lazo de realimentación a través de Colombia. El driver rechaza cualquier matriz que lo contenga.
 - La matriz y la frecuencia se guardan y se recuperan al reiniciar el Mac.
 
-Ejemplo de **referencia para la función de transferencia**: Smaart genera ruido rosa por la salida 1, que va a Colombia por LISTENTO envío 1. Para tener también la referencia local en la entrada 8:
+**Presets:**
 
-```
-avmctl disconnect listento.out.8 smaart.in.8
-avmctl connect smaart.out.1 smaart.in.8
-```
+| Preset | Conexiones |
+| --- | --- |
+| **Medición** (predeterminado; botón «Preset medición», `avmctl preset default`) | Smaart Salida N → LISTENTO Envío N (1-8) · LISTENTO Retorno N → Smaart Entrada N (1-7) · **Smaart Salida 1 → Smaart Entrada 8 (REFERENCIA LOCAL)**, sin el retorno 8 de LISTENTO |
+| **Directo 8×8** (botón «Directo 8×8», `avmctl preset direct`) | Smaart Salida N → LISTENTO Envío N y LISTENTO Retorno N → Smaart Entrada N, de 1 a 8, sin referencia local |
+| **Vaciar** (`avmctl preset clear`) | Ninguna |
 
-En Smaart: medición = entrada 1 (retorno), referencia = entrada 8. El retardo de ida y vuelta por internet lo encuentra el buscador de delay de Smaart. AV Matrix no lo compensa.
+Con el preset de medición, Smaart genera ruido rosa por la Salida 1. La señal va a Colombia por LISTENTO Envío 1 y también llega a la Entrada 8 como referencia local. En Smaart: medición = Entrada 1 (retorno), referencia = Entrada 8. El retardo de ida y vuelta por internet lo encuentra el buscador de delay de Smaart; AV Matrix no lo compensa. Smaart ve el canal 8 con el nombre «Entrada 8 (referencia local)».
 
 ## 3. Compilar
 
@@ -107,7 +110,7 @@ Guarda una copia de lo que elimina en `~/AVMatrix-backups/uninstall_<fecha>/` y 
 
 ## 6. Uso con Smaart y LISTENTO
 
-1. Abra **AV Matrix** (la app) y pulse **Preset: Smaart ⇄ LISTENTO**, o ajuste la matriz.
+1. Abra **AV Matrix** (la app) y pulse **Preset medición**, o ajuste la matriz.
 2. **Smaart**: dispositivo de entrada y de salida = **AV Matrix Smaart**. El generador sale por la salida 1. Las mediciones usan las entradas 1-8, que reciben el retorno.
 3. **LISTENTO**: para transmitir, entrada = **AV Matrix LISTENTO**, canales `Envío`. Para recibir el retorno, salida = **AV Matrix LISTENTO**, canales `Retorno`.
 4. En Colombia reciben, reproducen en el equipo y devuelven la señal por LISTENTO.
@@ -126,7 +129,7 @@ avmctl status                       dispositivos, frecuencia y formatos
 avmctl show                         matriz actual
 avmctl connect smaart.out.1 listento.in.1
 avmctl disconnect listento.out.8 smaart.in.8
-avmctl preset default | clear
+avmctl preset default | direct | clear   (default = medición)
 avmctl rate 44100 | 48000 | 96000
 avmctl recover                      repara una frecuencia inconsistente (sin audio activo)
 avmctl format smaart in s24         (smaart|listento|music, in|out, f32|s32|s24|s16)
