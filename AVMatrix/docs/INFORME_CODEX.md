@@ -1,8 +1,36 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 6; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 7; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 6 — saturación por formato, autoprueba SInt16, limpieza entre sesiones e icono (sobre `b6b52f0`)
+## 0. Revisión 7 — saturación exacta según el redondeo real (sobre `2e77f49`)
+
+Codex comprobó `2e77f49` en el Mac: compilación, pruebas, sanitizers y conservación del icono en una instalación simulada. Encontró un caso límite en `avm_format_delivery_clip_level`: `nearbyint` redondea al par, así que 32766,5 → 32766 (SInt16) y 8388606,5 → 8388606 (SInt24) no entregan el código máximo, pero el destino marcaba SAT por usar `>=`. Antes de modificar se hizo una copia de seguridad del proyecto en `2e77f49`. **No se instaló nada ni se reinició coreaudiod.** Todo lo de esta sección se probó **solo en Linux**.
+
+### 0.7.1 Corrección (`Driver/src/avm_core.c:311`)
+
+- Se elimina el umbral fijo. La nueva función `avm_format_is_full_scale(máx, mín, formato)` convierte los extremos con signo de cada bloque con **la misma conversión de entrega** (`avm_quantize` → `avm_float_to_sample`: `nearbyint` al par y recorte). Hay saturación si el resultado es **el código máximo o el mínimo** del formato (en Float32: ≥ 1,0 o ≤ -1,0).
+- Así la indicación coincide por construcción con lo entregado, incluida la asimetría del redondeo al par:
+  - SInt16: +32766,5 → 32766 (sin SAT); −32767,5 → −32768 (SAT);
+  - SInt24: +8388606,5 → 8388606 (sin SAT); −8388607,5 → −8388608 (SAT).
+- **Fuentes y destinos usan la misma función** (`avm_core.c:507` y `:607`). Los medidores registran ahora el máximo y el mínimo con signo de cada bloque; el pico mostrado sigue siendo el máximo absoluto.
+- **Cambio de comportamiento a revisar:** en una fuente entera, el código −32767 (o −8388607) ya **no** marca SAT, porque no es el mínimo del formato. Antes se marcaba al comparar el valor absoluto. Ahora fuente y destino coinciden en eso.
+- **Se conserva:** saturación por suma (cualquier suma ≥ 1,0 se convierte al código máximo en los cuatro formatos), SInt32 y Float32 a ±1,0, y el seqlock de sesión.
+- **`avmctl test`** (`Client/avmctl.c:456`) calcula el SAT esperado del Envío 1 con la misma función.
+
+### 0.7.2 Pruebas nuevas (`tests/test_meters.c`)
+
+| Prueba | Qué comprueba |
+| --- | --- |
+| `test_exact_rounding_points` (`:682`) | SInt16 y SInt24 **en el punto exacto y a ambos lados** (`nextafterf`), positivos y negativos: +32766,5 (32766, sin SAT), por encima (32767, SAT), por debajo (32766, sin SAT); +32767; +32767,5 (recortado a 32767, SAT); −32767,5 (−32768, SAT), hacia cero (−32767, sin SAT), más negativo (−32768, SAT); −32767 y −32766,5 (sin SAT); −1,0 (SAT). Lo mismo con 8388606,5 y −8388607,5 en SInt24. SInt32 y Float32 a ±1,0 y justo dentro. En cada caso se comprueba el **código entregado** y el SAT |
+| `test_clip_matches_delivery_sweep` (`:734`) | Barrido de **todos los float** alrededor de ±escala completa en los 4 formatos: SAT ⇔ el código entregado es el máximo o el mínimo |
+| `test_source_codes_near_full_scale` (`:765`) | Fuentes SInt16 y SInt24 con los códigos máx, máx−1, máx−2, mín, mín+1 y mín+2: SAT en fuente y destino solo con máx y mín |
+| Mutaciones | Umbral anterior (`>=` 32766,5/24 bits): 11 fallos. Negativo simétrico (|mín| ≥ máx): 8 fallos | Las dos se detectan |
+
+**Resultados:** medidores 117/117 (antes 83; las anteriores siguen pasando), núcleo 122/122, frecuencia 115/115, instalador 83/83, `build.sh` 17/17, textos 8/8. ASan, UBSan y TSan sin avisos. Compilación cruzada de driver, app y `avmctl` sin avisos.
+
+**Pendiente en el Mac:** `avmctl test` y `avmctl test-all` con los medidores reales.
+
+## 0septies. Revisión 6 — saturación por formato, autoprueba SInt16, limpieza entre sesiones e icono (sobre `b6b52f0`)
 
 Codex compiló los tres componentes en el Mac y reprodujo cuatro problemas. Antes de modificar se hizo una copia de seguridad del proyecto en `b6b52f0`. **No se instaló nada ni se reinició coreaudiod.**
 

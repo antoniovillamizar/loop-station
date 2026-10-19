@@ -612,10 +612,10 @@ static void test_selftest_clip_expectations(void)
             avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
             avm_engine_meter_snapshot(e, now, s, d);
             float q0 = avm_quantize(sent[0], sf), q1 = avm_quantize(sent[1], sf), q2 = avm_quantize(sent[2], sf);
-            float dclip = avm_format_delivery_clip_level(df);
+
             struct { const avm_meter_reading* r; float peak; int clip; } exp[6] = {
                 { &s[0], q0, 1 }, { &s[1], q1, 0 }, { &s[2], q2, 0 },
-                { &d[AVM_DST_LINK_BASE], q0, q0 >= dclip }, { &d[AVM_DST_LINK_BASE + 1], q1 + q2, 1 },
+                { &d[AVM_DST_LINK_BASE], q0, avm_format_is_full_scale(q0, 0.0f, df) }, { &d[AVM_DST_LINK_BASE + 1], q1 + q2, 1 },
                 { &d[AVM_DST_LINK_BASE + 2], 0.0f, 0 },
             };
             for (int k = 0; k < 6; k++)
@@ -632,6 +632,157 @@ static void test_selftest_clip_expectations(void)
     float q = avm_quantize(0.6f, AVM_FMT_SINT16);
     CHECK(fabsf(q - 0.6f) > 1e-6f && fabsf((q + q) - 1.2f) > 1e-6f,
           "en SInt16 los valores reales difieren de 0,6/1,2 más que la tolerancia: hacía falta cuantizar el esperado");
+}
+
+// --- Revisión 7: saturación exactamente donde la conversión entrega escala completa ---
+
+static int64_t decode_code(const uint8_t* q, avm_format fmt)
+{
+    if (fmt == AVM_FMT_SINT16) { int16_t v; memcpy(&v, q, 2); return v; }
+    if (fmt == AVM_FMT_SINT32) { int32_t v; memcpy(&v, q, 4); return v; }
+    int32_t v = (int32_t)((uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16));
+    if (v & 0x800000) v -= 0x1000000;
+    return v;
+}
+
+static int64_t max_code(avm_format f) { return f == AVM_FMT_SINT16 ? 32767 : f == AVM_FMT_SINT24 ? 8388607 : 2147483647; }
+static int64_t min_code(avm_format f) { return -max_code(f) - 1; }
+
+// Envía `v` (float) por Smaart Salida 1, lo recibe LISTENTO Envío 1 en `fmt`.
+// Devuelve el código entregado y el estado SAT del destino.
+static int64_t dest_case(avm_format fmt, float v, bool* clip, float* delivered_f)
+{
+    // Un solo motor para todos los casos; cada caso usa un instante y una
+    // ventana de medición nuevos (> 2 s después: sin pico ni SAT heredados).
+    static avm_engine* e = NULL;
+    static int64_t t = 0;
+    static uint64_t now = 600 * SEC;
+    if (e == NULL) e = new_engine();  // preset de medición
+    now += AVM_METER_CLIP_HOLD_NS + SEC;
+    t += 1;
+    float in[8] = { v, 0, 0, 0, 0, 0, 0, 0 };
+    uint8_t out[8 * 4];
+    avm_engine_write_metered(e, AVM_SRC_GROUP_SMAART, t, 1, in, AVM_FMT_FLOAT32, 8, now);
+    avm_engine_read_metered(e, AVM_DST_GROUP_LINK, t, 1, out, fmt, 8, now);
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    avm_engine_meter_snapshot(e, now, s, d);
+    *clip = d[AVM_DST_LINK_BASE].clip;
+    if (delivered_f) memcpy(delivered_f, out, 4);
+    return fmt == AVM_FMT_FLOAT32 ? 0 : decode_code(out, fmt);
+}
+
+static void expect_point(avm_format fmt, const char* name, float v, int64_t want_code, bool want_clip)
+{
+    bool clip = false;
+    int64_t code = dest_case(fmt, v, &clip, NULL);
+    CHECK(code == want_code && clip == want_clip, "%s: %.9g -> código %lld (esperado %lld), SAT %d (esperado %d)",
+          name, (double)v, (long long)code, (long long)want_code, clip, want_clip);
+}
+
+static void test_exact_rounding_points(void)
+{
+    // SInt16 (escala 32768). Punto de Codex: 32766,5 -> nearbyint (al par) = 32766.
+    const float s16 = 32768.0f;
+    float p = 32766.5f / s16;
+    expect_point(AVM_FMT_SINT16, "SInt16 +32766,5 (punto exacto)", p, 32766, false);
+    expect_point(AVM_FMT_SINT16, "SInt16 justo por encima", nextafterf(p, 2.0f), 32767, true);
+    expect_point(AVM_FMT_SINT16, "SInt16 justo por debajo", nextafterf(p, 0.0f), 32766, false);
+    expect_point(AVM_FMT_SINT16, "SInt16 +32767 (máximo)", 32767.0f / s16, 32767, true);
+    expect_point(AVM_FMT_SINT16, "SInt16 +32767,5 (redondea a 32768, se recorta)", 32767.5f / s16, 32767, true);
+    // Negativos: -32767,5 -> al par = -32768 (mínimo); -32766,5 -> -32766.
+    float n = -32767.5f / s16;
+    expect_point(AVM_FMT_SINT16, "SInt16 -32767,5 (punto exacto)", n, -32768, true);
+    expect_point(AVM_FMT_SINT16, "SInt16 justo hacia cero", nextafterf(n, 0.0f), -32767, false);
+    expect_point(AVM_FMT_SINT16, "SInt16 justo más negativo", nextafterf(n, -2.0f), -32768, true);
+    expect_point(AVM_FMT_SINT16, "SInt16 -32767 (no es el mínimo)", -32767.0f / s16, -32767, false);
+    expect_point(AVM_FMT_SINT16, "SInt16 -32766,5", -32766.5f / s16, -32766, false);
+    expect_point(AVM_FMT_SINT16, "SInt16 -1,0 (mínimo)", -1.0f, -32768, true);
+
+    // SInt24 (escala 8388608). Punto de Codex: 8388606,5 -> al par = 8388606.
+    const float s24 = 8388608.0f;
+    p = 8388606.5f / s24;
+    expect_point(AVM_FMT_SINT24, "SInt24 +8388606,5 (punto exacto)", p, 8388606, false);
+    expect_point(AVM_FMT_SINT24, "SInt24 justo por encima", nextafterf(p, 2.0f), 8388607, true);
+    expect_point(AVM_FMT_SINT24, "SInt24 justo por debajo", nextafterf(p, 0.0f), 8388606, false);
+    expect_point(AVM_FMT_SINT24, "SInt24 +8388607 (máximo)", 8388607.0f / s24, 8388607, true);
+    n = -8388607.5f / s24;
+    expect_point(AVM_FMT_SINT24, "SInt24 -8388607,5 (punto exacto)", n, -8388608, true);
+    expect_point(AVM_FMT_SINT24, "SInt24 justo hacia cero", nextafterf(n, 0.0f), -8388607, false);
+    expect_point(AVM_FMT_SINT24, "SInt24 justo más negativo", nextafterf(n, -2.0f), -8388608, true);
+    expect_point(AVM_FMT_SINT24, "SInt24 -8388607 (no es el mínimo)", -8388607.0f / s24, -8388607, false);
+    expect_point(AVM_FMT_SINT24, "SInt24 -1,0 (mínimo)", -1.0f, -8388608, true);
+
+    // Formatos restantes: SInt32 y Float32 satura en ±1,0.
+    expect_point(AVM_FMT_SINT32, "SInt32 1,0", 1.0f, 2147483647, true);
+    expect_point(AVM_FMT_SINT32, "SInt32 justo por debajo de 1,0", nextafterf(1.0f, 0.0f), 2147483520, false);
+    expect_point(AVM_FMT_SINT32, "SInt32 -1,0", -1.0f, -2147483647 - 1, true);
+    expect_point(AVM_FMT_SINT32, "SInt32 justo por encima de -1,0", nextafterf(-1.0f, 0.0f), -2147483520, false);
+    bool clip;
+    float got;
+    dest_case(AVM_FMT_FLOAT32, nextafterf(1.0f, 0.0f), &clip, &got);
+    CHECK(!clip && got == nextafterf(1.0f, 0.0f), "Float32 justo por debajo de 1,0: sin SAT, valor intacto");
+    dest_case(AVM_FMT_FLOAT32, 1.0f, &clip, &got);
+    CHECK(clip && got == 1.0f, "Float32 1,0: SAT");
+    dest_case(AVM_FMT_FLOAT32, -1.0f, &clip, &got);
+    CHECK(clip, "Float32 -1,0: SAT");
+    dest_case(AVM_FMT_FLOAT32, nextafterf(-1.0f, 0.0f), &clip, &got);
+    CHECK(!clip, "Float32 justo por encima de -1,0: sin SAT");
+}
+
+// Barrido: en cada float alrededor de ±escala completa, SAT del destino <=> el
+// código entregado es el máximo o el mínimo del formato (o |x| >= 1 en Float32).
+static void test_clip_matches_delivery_sweep(void)
+{
+    const avm_format fmts[] = { AVM_FMT_SINT16, AVM_FMT_SINT24, AVM_FMT_SINT32, AVM_FMT_FLOAT32 };
+    const char* names[] = { "SInt16", "SInt24", "SInt32", "Float32" };
+    for (int k = 0; k < 4; k++) {
+        avm_format f = fmts[k];
+        int mism = 0, tested = 0, clips = 0;
+        for (int sign = 0; sign < 2; sign++) {
+            float start = f == AVM_FMT_SINT16 ? 32765.0f / 32768.0f : 0.99999f;
+            float stop = 1.00001f;
+            for (float a = start; a <= stop; a = nextafterf(a, 2.0f)) {
+                float v = sign ? -a : a;
+                bool clip = false;
+                float fv = 0;
+                int64_t code = dest_case(f, v, &clip, &fv);
+                bool full = f == AVM_FMT_FLOAT32 ? (fv >= 1.0f || fv <= -1.0f) : (code == max_code(f) || code == min_code(f));
+                if (clip != full) {
+                    if (mism < 3) printf("  %s: %.9g -> código %lld, SAT %d\n", names[k], (double)v, (long long)code, clip);
+                    mism++;
+                }
+                clips += clip;
+                tested++;
+                if (f == AVM_FMT_SINT16 && tested > 20000) break;  // límite de seguridad
+            }
+        }
+        CHECK(mism == 0 && clips > 0, "%s: SAT coincide con la entrega de escala completa en %d valores cercanos a ±1 (%d con SAT)",
+              names[k], tested, clips);
+    }
+}
+
+// Fuente en formato entero: SAT solo con el código máximo o el mínimo, coherente con el destino.
+static void test_source_codes_near_full_scale(void)
+{
+    const avm_format fmts[] = { AVM_FMT_SINT16, AVM_FMT_SINT24 };
+    for (int k = 0; k < 2; k++) {
+        avm_format f = fmts[k];
+        int bad = 0;
+        const int64_t codes[] = { max_code(f), max_code(f) - 1, max_code(f) - 2, min_code(f), min_code(f) + 1, min_code(f) + 2 };
+        for (int i = 0; i < 6; i++) {
+            avm_engine* e = new_engine();
+            avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+            int64_t got = roundtrip_int(e, f, codes[i], 0, 610 * SEC, s, d);
+            bool full = codes[i] == max_code(f) || codes[i] == min_code(f);
+            if (got != codes[i] || s[0].clip != full || d[AVM_DST_LINK_BASE].clip != full) {
+                bad++;
+                printf("  formato %d código %lld: entregado %lld, SAT fuente %d destino %d (esperado %d)\n",
+                       f, (long long)codes[i], (long long)got, s[0].clip, d[AVM_DST_LINK_BASE].clip, full);
+            }
+            free(e);
+        }
+        CHECK(bad == 0, "formato %d: fuente y destino saturan solo con el código máximo o mínimo (incluido el negativo)", f);
+    }
 }
 
 int main(void)
@@ -651,6 +802,9 @@ int main(void)
     test_reset_clears_meters();
     test_reset_concurrent_readers();
     test_selftest_clip_expectations();
+    test_exact_rounding_points();
+    test_clip_matches_delivery_sweep();
+    test_source_codes_near_full_scale();
     printf("Medidores: %d comprobaciones correctas, %d fallos\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

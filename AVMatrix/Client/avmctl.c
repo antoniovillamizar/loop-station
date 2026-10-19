@@ -449,11 +449,11 @@ static void meters_during_clip(void)
     const float q0 = avm_quantize(kClipOut[0], src_fmt);
     const float q1 = avm_quantize(kClipOut[1], src_fmt);
     const float q2 = avm_quantize(kClipOut[2], src_fmt);
-    const float dst_clip = avm_format_delivery_clip_level(dst_fmt);
+
     meter_expect("Smaart Salida 1 a 0 dBFS (SAT)", &s[AVM_SRC_SMAART_BASE + 0], q0, 1);
     meter_expect("Smaart Salida 2 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 1], q1, 0);
     meter_expect("Smaart Salida 3 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 2], q2, 0);
-    meter_expect("LISTENTO Envío 1 = Salida 1", &d[AVM_DST_LINK_BASE + 0], q0, q0 >= dst_clip);
+    meter_expect("LISTENTO Envío 1 = Salida 1", &d[AVM_DST_LINK_BASE + 0], q0, avm_format_is_full_scale(q0, 0.0f, dst_fmt));
     meter_expect("LISTENTO Envío 2 = 0,6 + 0,6 (SAT)", &d[AVM_DST_LINK_BASE + 1], q1 + q2, 1);
     meter_expect("LISTENTO Envío 3 sin ruta (silencio)", &d[AVM_DST_LINK_BASE + 2], 0.0f, 0);
 }

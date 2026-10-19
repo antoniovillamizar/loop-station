@@ -64,7 +64,7 @@ Cada canal tiene, junto a su nombre, una **barra de nivel**, la **lectura de pic
 | **Receptores (izquierda, a la derecha de cada nombre):** Smaart Entradas 1-8, LISTENTO Envíos 1-8 | La señal **realmente entregada**, después del enrutamiento y de la **suma** de las conexiones. No repite el medidor de la fuente: una entrada sin conexiones marca silencio aunque la fuente tenga señal |
 
 - **Escala:** de -60 a 0 dBFS. Verde hasta -18, amarillo hasta -6 y naranja hasta 0. Un destino que suma por encima de 0 dBFS muestra valores positivos (por ejemplo +3,2).
-- **Saturación:** el LED rojo se enciende cuando una muestra llega a escala completa. En una fuente: 0 dBFS, o el código máximo si el formato es entero. En un destino: una suma de 1,0 o más. Se mantiene 2 s.
+- **Saturación:** el LED rojo se enciende cuando la muestra es de escala completa en su formato: el código máximo o el mínimo en los formatos enteros (con el mismo redondeo que la entrega), y ±1,0 en Float32. Vale igual para fuentes y destinos; una suma de 1,0 o más siempre satura. Se mantiene 2 s.
 - **«—»** = no llega audio a ese canal (la app no lo usa o el audio se detuvo; tarda como mucho 0,25 s). **«−∞»** = llega audio, pero es silencio digital.
 - El pico se calcula por ventanas de 50 ms; un pico antiguo desaparece en 0,1 s.
 - **La medición no modifica el audio.** El driver observa los mismos valores que ya transporta: sin copias, sin procesamiento, sin cambios de ganancia ni retardo, y sin bloquear el hilo de audio (solo operaciones atómicas). Las pruebas comprueban que lo transportado es idéntico bit a bit con medición y sin ella.

@@ -308,15 +308,12 @@ bool avm_meters_unpack(const uint8_t* blob, size_t len,
     return true;
 }
 
-float avm_format_delivery_clip_level(avm_format fmt)
+bool avm_format_is_full_scale(float hi, float lo, avm_format fmt)
 {
-    switch (fmt) {
-        case AVM_FMT_SINT24: return 8388606.5f / 8388608.0f;
-        case AVM_FMT_SINT16: return 32766.5f / 32768.0f;
-        case AVM_FMT_SINT32:
-        case AVM_FMT_FLOAT32:
-        default:             return 1.0f;
-    }
+    // Ida y vuelta con la conversión de entrega: el resultado es exactamente
+    // código/escala, comparable con los extremos del formato.
+    return avm_quantize(hi, fmt) >= avm_format_clip_level(fmt)
+        || avm_quantize(lo, fmt) <= -1.0f;
 }
 
 float avm_quantize(float v, avm_format fmt)
@@ -486,7 +483,7 @@ void avm_engine_write_metered(avm_engine* e, avm_src_group g, int64_t sample_tim
 
     const uint8_t* in = (const uint8_t*)interleaved;
     const uint32_t frame_bytes = bps * channels;
-    float peak[AVM_CHANNELS_PER_PORT] = { 0 };
+    float vmax[AVM_CHANNELS_PER_PORT] = { 0 }, vmin[AVM_CHANNELS_PER_PORT] = { 0 };
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
         if (t < 0) continue;
@@ -495,8 +492,9 @@ void avm_engine_write_metered(avm_engine* e, avm_src_group g, int64_t sample_tim
         for (int c = 0; c < nch; c++) {
             float v = ((uint32_t)c < channels) ? avm_sample_to_float(fp + (size_t)c * bps, fmt) : 0.0f;
             atomic_store_explicit(&e->ring[base + c][idx], v, memory_order_relaxed);
-            float a = fabsf(v);  // medición: solo se observa el valor ya convertido
-            if (a > peak[c]) peak[c] = a;
+            // Medición: solo se observa el valor ya convertido (extremos con signo).
+            if (v > vmax[c]) vmax[c] = v;
+            if (v < vmin[c]) vmin[c] = v;
         }
     }
 
@@ -504,9 +502,9 @@ void avm_engine_write_metered(avm_engine* e, avm_src_group g, int64_t sample_tim
         atomic_store_explicit(&e->written_end[g], end, memory_order_release);
 
     if (now_ns != 0) {
-        const float clip_level = avm_format_clip_level(fmt);
         for (int c = 0; c < nch; c++)
-            avm_meter_update(&e->src_meters[base + c], peak[c], peak[c] >= clip_level, now_ns);
+            avm_meter_update(&e->src_meters[base + c], vmax[c] > -vmin[c] ? vmax[c] : -vmin[c],
+                             avm_format_is_full_scale(vmax[c], vmin[c], fmt), now_ns);
     }
 }
 
@@ -560,7 +558,7 @@ bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time
 
     uint8_t* out = (uint8_t*)interleaved;
     const uint32_t frame_bytes = bps * channels;
-    float peak[AVM_CHANNELS_PER_PORT] = { 0 };
+    float vmax[AVM_CHANNELS_PER_PORT] = { 0 }, vmin[AVM_CHANNELS_PER_PORT] = { 0 };
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
         int64_t idx = t & AVM_RING_MASK;
@@ -577,8 +575,9 @@ bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time
             }
             avm_float_to_sample(acc, fp + (size_t)c * bps, fmt);
             if ((int)c < dnch) {
-                float a = fabsf(acc);  // medición: el valor sumado que se entrega
-                if (a > peak[c]) peak[c] = a;
+                // Medición: el valor sumado que se entrega (extremos con signo).
+                if (acc > vmax[c]) vmax[c] = acc;
+                if (acc < vmin[c]) vmin[c] = acc;
             }
         }
     }
@@ -600,11 +599,12 @@ bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time
         }
     }
     if (now_ns != 0) {
-        // Saturación según el formato entregado: se enciende cuando la muestra
-        // entregada es de escala completa (y siempre que la suma alcanza 1,0).
-        const float clip_level = avm_format_delivery_clip_level(fmt);
+        // Saturación según la conversión real al formato entregado: se enciende
+        // exactamente cuando se entrega el código máximo o el mínimo (una suma
+        // de 1,0 o más siempre lo produce).
         for (int c = 0; c < dnch; c++)
-            avm_meter_update(&e->dst_meters[dbase + c], peak[c], peak[c] >= clip_level, now_ns);
+            avm_meter_update(&e->dst_meters[dbase + c], vmax[c] > -vmin[c] ? vmax[c] : -vmin[c],
+                             avm_format_is_full_scale(vmax[c], vmin[c], fmt), now_ns);
     }
     return true;
 }

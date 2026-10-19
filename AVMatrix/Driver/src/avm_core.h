@@ -210,15 +210,17 @@ void avm_meters_pack(const avm_meter_reading src[AVM_NUM_SOURCES],
 bool avm_meters_unpack(const uint8_t* blob, size_t len,
                        avm_meter_reading src[AVM_NUM_SOURCES], avm_meter_reading dst[AVM_NUM_DESTS]);
 
-// Nivel de saturación de la entrada de una fuente según su formato físico:
-// el valor de escala completa que ese formato puede representar.
+// Valor float del código positivo de escala completa de un formato
+// (32767/32768, 8388607/8388608; 1,0 para Float32 y SInt32).
 float avm_format_clip_level(avm_format fmt);
 
-// Saturación de un destino según el formato en que se entrega: el umbral a
-// partir del cual la conversión produce el código de escala completa (con
-// redondeo al más cercano). Float32 y SInt32: 1,0. SInt24: 8388606,5/2^23.
-// SInt16: 32766,5/32768. Una suma de 1,0 o más siempre supera el umbral.
-float avm_format_delivery_clip_level(avm_format fmt);
+// Saturación según la conversión real al formato `fmt`: true si, al convertir
+// el valor más alto (`hi`) o el más bajo (`lo`) de un bloque con la misma
+// función que entrega las muestras (avm_float_to_sample: redondeo al par con
+// nearbyint y recorte), resulta el código máximo o el mínimo del formato.
+// En Float32: hi >= 1,0 o lo <= -1,0. Se usa igual para fuentes y destinos.
+// Ejemplos SInt16: 32766,5/32768 -> 32766 (no satura); -32767,5/32768 -> -32768 (satura).
+bool avm_format_is_full_scale(float hi, float lo, avm_format fmt);
 
 // Valor float tras pasar por el formato `fmt` (ida y vuelta, con la misma
 // conversión que el driver). Sirve para calcular valores esperados exactos.
