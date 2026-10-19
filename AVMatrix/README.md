@@ -128,6 +128,7 @@ avmctl connect smaart.out.1 listento.in.1
 avmctl disconnect listento.out.8 smaart.in.8
 avmctl preset default | clear
 avmctl rate 44100 | 48000 | 96000
+avmctl recover                      repara una frecuencia inconsistente (sin audio activo)
 avmctl format smaart in s24         (smaart|listento|music, in|out, f32|s32|s24|s16)
 avmctl test                         autoprueba a la frecuencia actual
 avmctl test-all                     autoprueba en 3 frecuencias x 4 formatos (~1 min)
@@ -140,6 +141,8 @@ avmctl test-all                     autoprueba en 3 frecuencias x 4 formatos (~1
 **Frecuencias:** 44 100, 48 000 y 96 000 Hz. Los tres dispositivos cambian juntos.
 
 **El cambio de frecuencia solo se admite sin audio activo** en ninguno de los tres dispositivos. Detenga el audio en Smaart, cierre LISTENTO y pare la música, y luego cambie la frecuencia (en la app, con `avmctl rate` o en Smaart). Si hay audio activo, el cambio se rechaza con un aviso. Así ningún dispositivo funciona nunca a una frecuencia distinta de la que macOS cree. Si macOS cancela un cambio a medias, el driver vuelve a la frecuencia anterior en los tres.
+
+Si aun así los dispositivos pudieran haber quedado a frecuencias distintas (por ejemplo, macOS cancela también la vuelta atrás o no la completa), AV Matrix **no deja arrancar el audio** en ninguno de los tres hasta repararlo. `avmctl status` lo indica y la app muestra un aviso en rojo con el botón **«Reparar frecuencia»**. Para repararlo, sin audio activo, use ese botón o `avmctl recover`: vuelve a aplicar la frecuencia actual en los tres dispositivos.
 
 **Formato que ven las aplicaciones (formato virtual):** siempre **32 bits coma flotante**. Así funciona CoreAudio: Smaart, LISTENTO y los demás programas intercambian audio en Float32 con el HAL.
 
@@ -178,6 +181,7 @@ App/AVMatrixApp.m             app de la matriz (AppKit)
 tests/test_core.c             pruebas del núcleo (matriz, buffers, formatos, concurrencia)
 tests/test_rate.c             pruebas de la transacción de frecuencia
 tests/test_install.sh         pruebas del instalador con herramientas simuladas (tests/fakes)
+tests/test_build_script.sh    ejecuta build.sh con una cadena de herramientas simulada
 scripts/                      build.sh, install.sh, uninstall.sh
 dist/                         compilación precompilada (cruzada, SDK 15.5)
 docs/INFORME_CODEX.md         informe de revisión

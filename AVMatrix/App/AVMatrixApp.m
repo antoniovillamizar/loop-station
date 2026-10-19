@@ -12,6 +12,7 @@
 @property (strong) NSWindow* window;
 @property (strong) NSTextField* statusLabel;
 @property (strong) NSPopUpButton* ratePopup;
+@property (strong) NSButton* recoverButton;
 @property (strong) NSMutableArray<NSMutableArray<NSButton*>*>* cells;   // [destino][fuente]
 @property (strong) NSMutableArray<NSTextField*>* sumLabels;
 @property (assign) BOOL listening;
@@ -96,13 +97,15 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     NSButton* presetBtn = [NSButton buttonWithTitle:@"Preset: Smaart ⇄ LISTENTO" target:self action:@selector(presetDefault:)];
     NSButton* clearBtn = [NSButton buttonWithTitle:@"Vaciar matriz" target:self action:@selector(presetClear:)];
     NSButton* reloadBtn = [NSButton buttonWithTitle:@"Recargar" target:self action:@selector(reloadPressed:)];
+    self.recoverButton = [NSButton buttonWithTitle:@"Reparar frecuencia" target:self action:@selector(recoverPressed:)];
+    self.recoverButton.hidden = YES;
 
     NSStackView* header = [NSStackView stackViewWithViews:@[ title, self.statusLabel ]];
     header.orientation = NSUserInterfaceLayoutOrientationVertical;
     header.alignment = NSLayoutAttributeLeading;
     header.spacing = 2;
 
-    NSStackView* controls = [NSStackView stackViewWithViews:@[ Label(@"Frecuencia:", 12, NO), self.ratePopup, presetBtn, clearBtn, reloadBtn ]];
+    NSStackView* controls = [NSStackView stackViewWithViews:@[ Label(@"Frecuencia:", 12, NO), self.ratePopup, presetBtn, clearBtn, reloadBtn, self.recoverButton ]];
     controls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     controls.spacing = 8;
 
@@ -240,6 +243,14 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     for (int k = 0; k < AVM_DEV_COUNT; k++)
         if (avm_find_device((avm_device_kind)k) == kAudioObjectUnknown)
             [parts addObject:[NSString stringWithFormat:@"falta %s", avm_device_label((avm_device_kind)k)]];
+    int health = AVM_RATE_HEALTH_OK;
+    avm_get_rate_health(&health);
+    self.recoverButton.hidden = health != AVM_RATE_HEALTH_INCONSISTENT;
+    if (health == AVM_RATE_HEALTH_INCONSISTENT)
+        [parts addObject:@"FRECUENCIA INCONSISTENTE: el audio no arrancará hasta pulsar «Reparar frecuencia» (sin audio activo)"];
+    else if (health == AVM_RATE_HEALTH_CHANGING)
+        [parts addObject:@"cambio de frecuencia en curso"];
+    self.statusLabel.textColor = health == AVM_RATE_HEALTH_INCONSISTENT ? [NSColor systemRedColor] : [NSColor secondaryLabelColor];
     self.statusLabel.stringValue = parts.count
         ? [parts componentsJoinedByString:@", "]
         : [NSString stringWithFormat:@"Dispositivos: AV Matrix Smaart · AV Matrix LISTENTO · AV Matrix Música — %.1f kHz", rate / 1000.0];
@@ -260,6 +271,8 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     if (dev != kAudioObjectUnknown) {
         AudioObjectPropertyAddress mx = { AVM_PROPERTY_MATRIX, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
         AudioObjectAddPropertyListenerBlock(dev, &mx, dispatch_get_main_queue(), block);
+        AudioObjectPropertyAddress rs = { AVM_PROPERTY_RATE_STATE, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+        AudioObjectAddPropertyListenerBlock(dev, &rs, dispatch_get_main_queue(), block);
         AudioObjectPropertyAddress sr = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
         AudioObjectAddPropertyListenerBlock(dev, &sr, dispatch_get_main_queue(), block);
         self.listening = YES;
@@ -307,6 +320,17 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     avm_matrix m;
     avm_matrix_clear(&m);
     [self apply:&m];
+}
+
+- (void)recoverPressed:(id)sender
+{
+    (void)sender;
+    OSStatus err = avm_recover_rate(0);
+    if (err == kAudioHardwareNotReadyError)
+        [self showError:@"No se puede reparar con audio activo. Detenga el audio en Smaart, LISTENTO y la música, y vuelva a intentarlo."];
+    else if (err != noErr)
+        [self showError:[NSString stringWithFormat:@"No se pudo reparar la frecuencia (error %d).", (int)err]];
+    [self reload];
 }
 
 - (void)reloadPressed:(id)sender

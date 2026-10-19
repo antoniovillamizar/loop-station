@@ -1,8 +1,74 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 18 de octubre de 2026. Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisión 2; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 1 — correcciones pedidas por Codex sobre `04e6cec`
+## 0. Revisión 2 — correcciones pedidas por Codex sobre `9d17362`
+
+Se conservan todas las correcciones de la revisión 1. Antes de modificar se hizo una copia de seguridad del proyecto en `9d17362` (tarball en el directorio temporal de la sesión; el commit también la conserva). **No se instaló nada ni se reinició coreaudiod.**
+
+### 0.A Recuperación de frecuencia: no arrancar audio mientras haya discrepancia
+
+Fallos que reprodujo Codex y su corrección:
+
+| Fallo en `9d17362` | Corrección |
+| --- | --- |
+| Reversión fallida: `inconsistent=true`, pero StartIO arrancaba | `avm_rate_io_start` devuelve `AVM_RATE_INCONSISTENT` mientras `inconsistent` sea true (`avm_rate.c:152`). El driver responde 'nrdy' en StartIO y lo registra (`AVMatrixDriver.c:1270`) |
+| Cambio aplicado en parte y caducado: StartIO arrancaba | Se marca inconsistente (`avm_rate.c:55`) y queda bloqueado por la regla anterior |
+| Reversión caducada sin ningún Perform: ni siquiera marcaba `inconsistent` | Toda reversión que caduca sin completarse marca inconsistente. Una reversión solo existe si el cambio previo se aplicó en parte, así que la discrepancia sigue (`avm_rate.c:55`) |
+| Pedir la frecuencia actual devolvía SAME sin reparar | En estado inconsistente, pedir la frecuencia actual (o cualquier otra admitida) abre una **recuperación** que se aplica en los tres dispositivos (`avm_rate.c:81`). SAME solo se devuelve si el estado es coherente |
+
+Reglas resultantes:
+
+- Solo un cambio sin ningún Perform conserva el estado previo al caducar o cancelarse.
+- `inconsistent` solo vuelve a false cuando **los tres** dispositivos aplican la misma transacción. Las recuperaciones canceladas, caducadas o parciales mantienen el bloqueo.
+
+**Cómo se recupera** (sin audio activo):
+
+- **Propiedad `'rsta'` (nueva, `AVMatrixDriver.c:44`).**
+  - Lectura: 0 coherente, 1 cambio en curso, 2 inconsistente (`AVMatrixDriver.c:649`).
+  - Escritura: un CFNumber con la frecuencia, 0 = la actual (`AVMatrixDriver.c:1188`), que llama a la misma transacción.
+  - Esta vía no depende de que el HAL reenvíe al driver un `NominalSampleRate` sin cambios, cosa que no se pudo verificar sin Mac. Pedir la misma frecuencia por la propiedad estándar también recupera si el HAL la reenvía.
+- **`avmctl recover`** (`avmctl.c:165`, `avm_client.c:92`): pide la recuperación y espera a que el estado sea coherente. `avmctl status` muestra el estado de la frecuencia y devuelve error si está inconsistente o en cambio.
+- **App:** aviso en rojo y botón **«Reparar frecuencia»**, visible solo en estado inconsistente (`AVMatrixApp.m:325`). Escucha los cambios de `'rsta'`.
+- El driver notifica `'rsta'` tras cada Perform, Abort o fallo de petición de frecuencia.
+
+### 0.B `scripts/build.sh` («clang: error: no input files»)
+
+**Causa:** un reemplazo de texto de la revisión 1 coincidió con `"$OUT/test_rate"` dentro de la propia orden `clang` y partió la línea.
+
+**Corrección** (`build.sh:58-60`):
+
+```
+clang $CFLAGS -o "$OUT/test_rate" tests/test_rate.c Driver/src/avm_rate.c
+"$OUT/test_rate"
+bash tests/test_install.sh        # una sola vez
+```
+
+**Prueba nueva `tests/test_build_script.sh`:** ejecuta `build.sh` completo con una cadena de herramientas simulada (`tests/fakes/clang`, `xcrun`, `xcode-select`, `sw_vers`, además de `codesign`, `lipo` y `plutil`).
+
+- El `clang` simulado exige fuentes como el real.
+- Los binarios de prueba se compilan y ejecutan de verdad con el `cc` del sistema.
+- Comprueba: que el script termina bien, que no aparece «no input files», que hay dos resultados de pruebas C (núcleo y frecuencia), que el instalador se prueba **exactamente una vez** y que se generan los tres componentes, con `avm_rate.c` en el driver.
+- **Contra el `build.sh` de `9d17362` reproduce el fallo de Codex** (6 de 7 comprobaciones fallan y aparece «clang: error: no input files»).
+- `build.sh` acepta `AVM_BUILD_OUT` para no escribir en el repositorio durante la prueba.
+
+### 0.C Pruebas de esta revisión
+
+| Prueba | Resultado |
+| --- | --- |
+| `tests/test_rate.c`: la prueba que aceptaba arrancar con `inconsistent=true` se sustituyó por una que **exige** el bloqueo. Nuevas: reversión cancelada (StartIO bloqueado en los tres, también tras mucho tiempo, y desbloqueo solo tras recuperar); recuperación pidiendo la misma frecuencia (no SAME, sigue bloqueado hasta el tercer Perform) o pidiendo otra; recuperación cancelada, caducada o parcial (siguen bloqueando); SAME cuando es coherente; cambio parcial caducado; reversión caducada sin Perform; fallo de la petición de reversión | **115/115** |
+| Mutaciones que reintroducen los fallos de Codex: StartIO permitido con inconsistencia (42 fallos), caducidad parcial sin marca (11), reversión caducada sin marca (11), SAME sin reparar (36) | Las cuatro se detectan |
+| `tests/test_build_script.sh` | **7/7**; con el `build.sh` anterior, 6 fallos |
+| `test_core.c` / `test_install.sh` | 115/115 / 57/57 (sin cambios) |
+| ASan + UBSan, TSan; compilación cruzada de driver, `avmctl` y app (SDK 15.5, arm64 + x86_64, `-Werror`) | Sin avisos |
+
+### 0.D Pendiente en el Mac (nuevo)
+
+- Si el HAL reenvía o no un `NominalSampleRate` igual al actual. La recuperación no depende de ello, gracias a `'rsta'`.
+- Que llamar a `PropertiesChanged` desde `PerformDeviceConfigurationChange` no cause problemas en coreaudiod real. Es el mismo patrón que `SetPropertyData`, pero no está probado.
+- Comportamiento de las aplicaciones cuando StartIO devuelve 'nrdy' por inconsistencia: deberían mostrar un error de dispositivo no disponible.
+
+## 0bis. Revisión 1 — correcciones pedidas por Codex sobre `04e6cec`
 
 Codex aceptó la arquitectura Smaart / LISTENTO / Música. Se conservan todos los requisitos. **No se instaló nada ni se reinició coreaudiod** (esta sesión es Linux).
 
@@ -205,7 +271,7 @@ Orden propuesto, que sigue las etapas pedidas:
 - [ ] ¿Es aceptable la división Smaart / LISTENTO / Música frente al «único dispositivo»? (§3.1)
 - [ ] Propiedades del HAL: comparar `AVM_*_HasProperty`/`GetPropertyData` con el ejemplo NullAudio de Apple
 - [ ] Semántica de `ReadInput`/`WriteMix` y formato físico (`AVMatrixDriver.c:1290`)
-- [ ] Transacción de frecuencia (`avm_rate.c`, `AVMatrixDriver.c:461-595`, `:1215`)
+- [ ] Transacción y recuperación de frecuencia (`avm_rate.c`, `AVMatrixDriver.c:464-600`, `:649`, `:1188`, `:1270`)
 - [ ] Snapshots de matriz y validación de vuelta del escritor (`avm_core.c:200-280`, `:306`, `:394`)
 - [ ] Instalador transaccional y firmas (`scripts/install.sh`, `tests/test_install.sh`)
 - [ ] Regla anti-lazo: ¿hace falta prohibir algo más? (`avm_core.c:61`)

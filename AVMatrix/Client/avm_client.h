@@ -16,6 +16,10 @@ extern "C" {
 #define AVM_UID_LISTENTO  "AVMatrix_Listento_UID"
 #define AVM_UID_MUSIC     "AVMatrix_Music_UID"
 #define AVM_PROPERTY_MATRIX 'mtrx'
+#define AVM_PROPERTY_RATE_STATE 'rsta'
+
+// Estado de la frecuencia según el driver.
+typedef enum { AVM_RATE_HEALTH_OK = 0, AVM_RATE_HEALTH_CHANGING = 1, AVM_RATE_HEALTH_INCONSISTENT = 2 } avm_rate_health_t;
 
 typedef enum { AVM_DEV_SMAART = 0, AVM_DEV_LISTENTO = 1, AVM_DEV_MUSIC = 2, AVM_DEV_COUNT = 3 } avm_device_kind;
 
@@ -26,6 +30,11 @@ const char*   avm_device_label(avm_device_kind kind);
 
 OSStatus avm_get_matrix(avm_matrix* out);
 OSStatus avm_set_matrix(const avm_matrix* m);
+
+OSStatus avm_get_rate_health(int* out);
+// Vuelve a aplicar una frecuencia en los tres dispositivos (0 = la actual).
+// Repara el estado inconsistente; requiere que no haya audio activo.
+OSStatus avm_recover_rate(Float64 rate);
 
 OSStatus avm_get_sample_rate(Float64* out);
 OSStatus avm_set_sample_rate(Float64 rate);

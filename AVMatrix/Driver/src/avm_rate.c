@@ -46,14 +46,28 @@ static void close_transaction(avm_rate_state* st)
     st->is_revert = false;
 }
 
-// Una transacción abandonada caduca: si quedó aplicada a medias, se marca inconsistente.
+// Una transacción abandonada caduca. Queda inconsistente si pudo dejar
+// frecuencias distintas:
+//   * un cambio aplicado solo en parte;
+//   * cualquier reversión sin completar (existe porque el cambio anterior se
+//     aplicó en parte, así que sin Perform en los tres la discrepancia sigue).
+// Un cambio sin ningún Perform no altera nada: conserva el estado previo.
 static void expire_if_needed(avm_rate_state* st, uint64_t now)
 {
     if (!avm_rate_pending(st)) return;
     if (st->timeout == 0 || now < st->started_at || now - st->started_at <= st->timeout) return;
-    if (st->performed_mask != 0 && st->performed_mask != all_mask(st))
+    if (st->is_revert || st->performed_mask != 0)
         st->inconsistent = true;
+    if (!st->is_revert && st->performed_mask == 0)
+        st->current_rate = st->previous_rate;
     close_transaction(st);
+}
+
+int avm_rate_health(avm_rate_state* st, uint64_t now)
+{
+    expire_if_needed(st, now);
+    if (avm_rate_pending(st)) return 1;
+    return st->inconsistent ? 2 : 0;
 }
 
 avm_rate_status avm_rate_begin(avm_rate_state* st, double rate, uint64_t now, uint32_t* out_generation)
@@ -62,7 +76,9 @@ avm_rate_status avm_rate_begin(avm_rate_state* st, double rate, uint64_t now, ui
     expire_if_needed(st, now);
     if (avm_rate_pending(st)) return AVM_RATE_BUSY;
     if (st->running_total > 0) return AVM_RATE_IO_ACTIVE;
-    if (rate == st->current_rate) return AVM_RATE_SAME;
+    // En estado inconsistente, pedir la frecuencia actual es la recuperación:
+    // se vuelve a aplicar en los tres dispositivos.
+    if (rate == st->current_rate && !st->inconsistent) return AVM_RATE_SAME;
 
     next_generation(st);
     st->previous_rate = st->current_rate;
@@ -133,6 +149,7 @@ avm_rate_status avm_rate_io_start(avm_rate_state* st, uint32_t device, uint64_t 
     if (device >= st->device_count) return AVM_RATE_STALE;
     expire_if_needed(st, now);
     if (avm_rate_pending(st)) return AVM_RATE_BUSY;
+    if (st->inconsistent) return AVM_RATE_INCONSISTENT;
     st->running[device]++;
     st->running_total++;
     return AVM_RATE_OK;

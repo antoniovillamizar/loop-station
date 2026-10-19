@@ -71,6 +71,37 @@ OSStatus avm_set_matrix(const avm_matrix* m)
     return err;
 }
 
+OSStatus avm_get_rate_health(int* out)
+{
+    AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);
+    if (dev == kAudioObjectUnknown) return kAudioHardwareBadDeviceError;
+    AudioObjectPropertyAddress a = { AVM_PROPERTY_RATE_STATE, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFPropertyListRef plist = NULL;
+    UInt32 size = sizeof(plist);
+    OSStatus err = AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &plist);
+    if (err != noErr) return err;
+    if (plist == NULL) return kAudioHardwareUnspecifiedError;
+    SInt32 v = -1;
+    bool ok = CFGetTypeID(plist) == CFNumberGetTypeID() && CFNumberGetValue((CFNumberRef)plist, kCFNumberSInt32Type, &v);
+    CFRelease(plist);
+    if (!ok) return kAudioHardwareBadPropertySizeError;
+    *out = (int)v;
+    return noErr;
+}
+
+OSStatus avm_recover_rate(Float64 rate)
+{
+    AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);
+    if (dev == kAudioObjectUnknown) return kAudioHardwareBadDeviceError;
+    CFNumberRef n = CFNumberCreate(NULL, kCFNumberFloat64Type, &rate);
+    if (n == NULL) return kAudioHardwareUnspecifiedError;
+    AudioObjectPropertyAddress a = { AVM_PROPERTY_RATE_STATE, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFPropertyListRef plist = n;
+    OSStatus err = AudioObjectSetPropertyData(dev, &a, 0, NULL, sizeof(plist), &plist);
+    CFRelease(n);
+    return err;
+}
+
 OSStatus avm_get_sample_rate(Float64* out)
 {
     AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);

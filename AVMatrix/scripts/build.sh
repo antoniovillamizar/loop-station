@@ -5,7 +5,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
-OUT="$ROOT/build/mac"
+OUT="${AVM_BUILD_OUT:-$ROOT/build/mac}"
 MINOS=12.0
 ARCHS="-arch arm64 -arch x86_64"
 CFLAGS="-std=c11 -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS"
@@ -52,11 +52,10 @@ clang $ARCHS -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmac
     -framework Cocoa -framework CoreAudio -framework CoreFoundation
 codesign --force --sign "${AVM_SIGN_IDENTITY:--}" --timestamp=none "$APP"
 
-echo "== Pruebas del núcleo =="
+echo "== Pruebas (núcleo, frecuencia, instalador) =="
 clang $CFLAGS -o "$OUT/test_core" tests/test_core.c Driver/src/avm_core.c
 "$OUT/test_core"
-clang $CFLAGS -o "$OUT/test_rate"
-bash tests/test_install.sh tests/test_rate.c Driver/src/avm_rate.c
+clang $CFLAGS -o "$OUT/test_rate" tests/test_rate.c Driver/src/avm_rate.c
 "$OUT/test_rate"
 bash tests/test_install.sh
 

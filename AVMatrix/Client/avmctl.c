@@ -6,6 +6,7 @@
 //   avmctl disconnect <fuente> <destino>
 //   avmctl preset default|clear
 //   avmctl rate 44100|48000|96000
+//   avmctl recover                     reaplica la frecuencia actual en los tres dispositivos
 //   avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>
 //   avmctl test                        aislamiento, música, regla anti-lazo y retardo de transporte
 //   avmctl test-all                    la misma prueba en las 3 frecuencias x 4 formatos
@@ -63,6 +64,16 @@ static int cmd_status(void)
                        (unsigned)asbd.mChannelsPerFrame, asbd.mSampleRate, f >= 0 ? avm_format_name((avm_format)f) : "?");
             }
         }
+    }
+    if (ok) {
+        int h = -1;
+        OSStatus err = avm_get_rate_health(&h);
+        if (err) { print_err("leer estado de frecuencia", err); ok = 0; }
+        else if (h == AVM_RATE_HEALTH_CHANGING) { printf("Frecuencia: cambio en curso\n"); ok = 0; }
+        else if (h == AVM_RATE_HEALTH_INCONSISTENT) {
+            printf("Frecuencia: INCONSISTENTE. El audio no arranca hasta recuperar: avmctl recover\n");
+            ok = 0;
+        } else printf("Frecuencia: coherente en los tres dispositivos\n");
     }
     return ok ? 0 : 1;
 }
@@ -149,6 +160,29 @@ static int cmd_rate(const char* s)
     if (!wait_for_rate(r)) { fprintf(stderr, "La frecuencia no cambió a %.0f Hz.\n", r); return 1; }
     printf("Frecuencia: %.0f Hz (los tres dispositivos comparten reloj)\n", r);
     return 0;
+}
+
+static int cmd_recover(void)
+{
+    OSStatus err = avm_recover_rate(0);
+    if (err == kAudioHardwareNotReadyError) {
+        fprintf(stderr, "No se puede recuperar con audio activo o con otro cambio en curso.\n"
+                        "Detenga el audio en Smaart, LISTENTO y la música, y vuelva a intentarlo.\n");
+        return 1;
+    }
+    if (err) { print_err("recuperar frecuencia", err); return 1; }
+    for (int i = 0; i < 60; i++) {
+        int h = -1;
+        if (avm_get_rate_health(&h) == noErr && h == AVM_RATE_HEALTH_OK) {
+            Float64 r = 0;
+            avm_get_sample_rate(&r);
+            printf("Recuperado: los tres dispositivos a %.0f Hz. El audio puede arrancar.\n", r);
+            return 0;
+        }
+        usleep(100000);
+    }
+    fprintf(stderr, "La recuperación no se completó. Consulte: log show --last 2m | grep -i avmatrix\n");
+    return 1;
 }
 
 static int parse_format(const char* s)
@@ -440,6 +474,7 @@ static void usage(void)
            "  avmctl disconnect <fuente> <destino>\n"
            "  avmctl preset default|clear\n"
            "  avmctl rate 44100|48000|96000\n"
+           "  avmctl recover\n"
            "  avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>\n"
            "  avmctl test\n"
            "  avmctl test-all\n\n"
@@ -463,6 +498,7 @@ int main(int argc, char** argv)
     if (!strcmp(c, "disconnect") && argc == 4) return cmd_connect(argv[2], argv[3], 0);
     if (!strcmp(c, "preset") && argc == 3) return cmd_preset(argv[2]);
     if (!strcmp(c, "rate") && argc == 3) return cmd_rate(argv[2]);
+    if (!strcmp(c, "recover")) return cmd_recover();
     if (!strcmp(c, "format") && argc == 5) return cmd_format(argv[2], argv[3], argv[4]);
     if (!strcmp(c, "test")) return cmd_test(0);
     if (!strcmp(c, "test-all")) return cmd_test(1);

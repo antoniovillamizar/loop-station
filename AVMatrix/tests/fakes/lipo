@@ -1,5 +1,6 @@
 #!/bin/bash
-# lipo simulado: -archs lee la línea "#ARCHS=..." del ejecutable.
+# lipo simulado: -archs lee la línea "#ARCHS=..." del ejecutable; -info la muestra.
+if [ "$1" = "-info" ]; then echo "Architectures in the fat file: $2 are: x86_64 arm64"; exit 0; fi
 [ "$1" = "-archs" ] || exit 2
 a=$(grep -m1 "^#ARCHS=" "$2" | sed 's/^#ARCHS=//')
 [ -n "$a" ] || exit 1

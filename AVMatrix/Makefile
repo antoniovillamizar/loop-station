@@ -19,6 +19,7 @@ test:
 	$(CC) $(CFLAGS) -o $(BUILD)/test_rate tests/test_rate.c Driver/src/avm_rate.c
 	./$(BUILD)/test_rate
 	bash tests/test_install.sh
+	bash tests/test_build_script.sh
 
 test-sanitize:
 	mkdir -p $(BUILD)

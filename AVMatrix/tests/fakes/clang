@@ -1,0 +1,24 @@
+#!/bin/bash
+# clang simulado para probar scripts/build.sh fuera de macOS.
+# - Exige archivos fuente, como el real ("clang: error: no input files").
+# - Los binarios de prueba (test_*) se compilan de verdad con el cc del sistema
+#   y se ejecutan; el resto se sustituye por un archivo marcador.
+if [ "${1:-}" = "--version" ]; then echo "clang simulado (pruebas de build.sh)"; exit 0; fi
+out="" srcs=() args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift ;;
+        -arch) shift ;;
+        -mmacosx-version-min=*|-framework|-fobjc-arc|-fvisibility=*|-bundle|-Wno-four-char-constants) [ "$1" = "-framework" ] && shift ;;
+        *.c|*.m) srcs+=("$1"); args+=("$1") ;;
+        *) args+=("$1") ;;
+    esac
+    shift
+done
+[ ${#srcs[@]} -gt 0 ] || { echo "clang: error: no input files" >&2; exit 1; }
+for f in "${srcs[@]}"; do [ -f "$f" ] || { echo "clang: error: no such file or directory: '$f'" >&2; exit 1; }; done
+[ -n "$out" ] || { echo "clang simulado: falta -o" >&2; exit 1; }
+case "$(basename "$out")" in
+    test_*) exec cc "${args[@]}" -o "$out" -lm -lpthread ;;
+    *) printf '#ARCHS=x86_64 arm64\n# binario simulado de: %s\n' "${srcs[*]}" > "$out"; chmod +x "$out" ;;
+esac

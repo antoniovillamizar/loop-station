@@ -37,6 +37,11 @@
 
 // Propiedad personalizada de la matriz (en el plug-in y en cada dispositivo).
 #define kAVM_PropertyMatrix       'mtrx'
+// Estado de la frecuencia (CFNumber). Lectura: 0 coherente, 1 cambio en curso,
+// 2 inconsistente (el audio no arranca hasta recuperar). Escritura: CFNumber con
+// la frecuencia a aplicar en los tres dispositivos (0 = la actual): es la vía de
+// recuperación que no depende de que el host reenvíe una frecuencia sin cambios.
+#define kAVM_PropertyRateState    'rsta'
 
 static const Float64 kAVM_SampleRates[] = { 44100.0, 48000.0, 96000.0 };
 #define kAVM_NumSampleRates       3
@@ -475,10 +480,9 @@ static void AVM_IssueRateRevert(avm_rate_abort_result r)
     }
 }
 
-static OSStatus AVM_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void* inChangeInfo)
+// Aplica una acción de configuración autorizada por el host. Ver PerformDeviceConfigurationChange.
+static OSStatus AVM_PerformConfigChange(AudioObjectID inDeviceObjectID, UInt64 inChangeAction)
 {
-    (void)inChangeInfo;
-    if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
     int dev = AVM_DeviceIndex(inDeviceObjectID);
     if (dev < 0) return kAudioHardwareBadObjectError;
 
@@ -534,6 +538,16 @@ static OSStatus AVM_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef 
     return kAudioHardwareIllegalOperationError;
 }
 
+static OSStatus AVM_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void* inChangeInfo)
+{
+    (void)inChangeInfo;
+    if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
+    OSStatus r = AVM_PerformConfigChange(inDeviceObjectID, inChangeAction);
+    if (AVM_ACTION_KIND(inChangeAction) == kAVM_ActionSetRate)
+        AVM_NotifyAllDevices(kAVM_PropertyRateState);
+    return r;
+}
+
 static OSStatus AVM_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void* inChangeInfo)
 {
     (void)inChangeInfo;
@@ -546,6 +560,7 @@ static OSStatus AVM_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef in
         avm_rate_abort_result r = avm_rate_abort(&gRate, (uint32_t)dev, AVM_ACTION_GEN(inChangeAction), AVM_NowNs());
         pthread_mutex_unlock(&gClockMutex);
         AVM_IssueRateRevert(r);
+        AVM_NotifyAllDevices(kAVM_PropertyRateState);
     }
     // Un cambio de formato solo se aplica en Perform: cancelarlo no deja nada que deshacer.
     return 0;
@@ -569,6 +584,7 @@ static OSStatus AVM_RequestRateChange(Float64 rate)
             return kAudioHardwareNotReadyError;
         case AVM_RATE_BUSY:        return kAudioHardwareNotReadyError;
         case AVM_RATE_STALE:       return kAudioHardwareIllegalOperationError;
+        case AVM_RATE_INCONSISTENT: return kAudioHardwareNotReadyError;  // avm_rate_begin no lo devuelve
         case AVM_RATE_OK:          break;
     }
 
@@ -581,6 +597,7 @@ static OSStatus AVM_RequestRateChange(Float64 rate)
             avm_rate_abort_result r = avm_rate_abort(&gRate, (uint32_t)i, gen, AVM_NowNs());
             pthread_mutex_unlock(&gClockMutex);
             AVM_IssueRateRevert(r);
+            AVM_NotifyAllDevices(kAVM_PropertyRateState);
             return err;
         }
     }
@@ -629,8 +646,22 @@ static OSStatus AVM_SetMatrixProperty(UInt32 inDataSize, const void* inData)
     return 0;
 }
 
+static OSStatus AVM_GetRateStateProperty(UInt32 inDataSize, UInt32* outDataSize, void* outData)
+{
+    if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+    pthread_mutex_lock(&gClockMutex);
+    SInt32 health = avm_rate_health(&gRate, AVM_NowNs());
+    pthread_mutex_unlock(&gClockMutex);
+    CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &health);
+    if (n == NULL) return kAudioHardwareUnspecifiedError;
+    *((CFPropertyListRef*)outData) = n;  // el cliente la libera
+    *outDataSize = sizeof(CFPropertyListRef);
+    return 0;
+}
+
 static const AudioServerPlugInCustomPropertyInfo kCustomProps[] = {
-    { kAVM_PropertyMatrix, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone }
+    { kAVM_PropertyMatrix,    kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kAVM_PropertyRateState, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone }
 };
 
 // ---------------------------------------------------------------------------
@@ -649,6 +680,7 @@ static Boolean AVM_PlugIn_HasProperty(const AudioObjectPropertyAddress* a)
         case kAudioPlugInPropertyResourceBundle:
         case kAudioObjectPropertyCustomPropertyInfoList:
         case kAVM_PropertyMatrix:
+        case kAVM_PropertyRateState:
             return true;
     }
     return false;
@@ -666,7 +698,8 @@ static OSStatus AVM_PlugIn_GetPropertyDataSize(const AudioObjectPropertyAddress*
         case kAudioPlugInPropertyTranslateUIDToDevice: *outDataSize = sizeof(AudioObjectID); return 0;
         case kAudioPlugInPropertyResourceBundle:     *outDataSize = sizeof(CFStringRef); return 0;
         case kAudioObjectPropertyCustomPropertyInfoList: *outDataSize = sizeof(kCustomProps); return 0;
-        case kAVM_PropertyMatrix:                    *outDataSize = sizeof(CFPropertyListRef); return 0;
+        case kAVM_PropertyMatrix:
+        case kAVM_PropertyRateState:                 *outDataSize = sizeof(CFPropertyListRef); return 0;
     }
     return kAudioHardwareUnknownPropertyError;
 }
@@ -720,6 +753,8 @@ static OSStatus AVM_PlugIn_GetPropertyData(const AudioObjectPropertyAddress* a, 
         }
         case kAVM_PropertyMatrix:
             return AVM_GetMatrixProperty(inDataSize, outDataSize, outData);
+        case kAVM_PropertyRateState:
+            return AVM_GetRateStateProperty(inDataSize, outDataSize, outData);
     }
     return kAudioHardwareUnknownPropertyError;
 }
@@ -740,6 +775,7 @@ static Boolean AVM_Device_HasProperty(int dev, const AudioObjectPropertyAddress*
         case kAudioObjectPropertyControlList:
         case kAudioObjectPropertyCustomPropertyInfoList:
         case kAVM_PropertyMatrix:
+        case kAVM_PropertyRateState:
         case kAudioDevicePropertyDeviceUID:
         case kAudioDevicePropertyModelUID:
         case kAudioDevicePropertyTransportType:
@@ -812,7 +848,8 @@ static OSStatus AVM_Device_GetPropertyDataSize(int dev, const AudioObjectPropert
         case kAudioDevicePropertyStreams:               *outDataSize = AVM_Device_StreamCount(dev, a->mScope) * sizeof(AudioObjectID); return 0;
         case kAudioObjectPropertyControlList:           *outDataSize = 0; return 0;
         case kAudioObjectPropertyCustomPropertyInfoList: *outDataSize = sizeof(kCustomProps); return 0;
-        case kAVM_PropertyMatrix:                       *outDataSize = sizeof(CFPropertyListRef); return 0;
+        case kAVM_PropertyMatrix:
+        case kAVM_PropertyRateState:                    *outDataSize = sizeof(CFPropertyListRef); return 0;
         case kAudioDevicePropertyTransportType:
         case kAudioDevicePropertyClockDomain:
         case kAudioDevicePropertyDeviceIsAlive:
@@ -880,6 +917,8 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
             return AVM_PlugIn_GetPropertyData(a, 0, NULL, inDataSize, outDataSize, outData);
         case kAVM_PropertyMatrix:
             return AVM_GetMatrixProperty(inDataSize, outDataSize, outData);
+        case kAVM_PropertyRateState:
+            return AVM_GetRateStateProperty(inDataSize, outDataSize, outData);
         case kAudioDevicePropertyTransportType: RETURN_U32(kAudioDeviceTransportTypeVirtual);
         case kAudioDevicePropertyRelatedDevices:
             if (inDataSize < sizeof(AudioObjectID)) { *outDataSize = 0; return 0; }
@@ -1086,7 +1125,7 @@ static OSStatus AVM_IsPropertySettable(AudioServerPlugInDriverRef inDriver, Audi
     if (!AVM_HasProperty(inDriver, inObjectID, inClientProcessID, inAddress)) return kAudioHardwareUnknownPropertyError;
 
     *outIsSettable = false;
-    if (inAddress->mSelector == kAVM_PropertyMatrix) {
+    if (inAddress->mSelector == kAVM_PropertyMatrix || inAddress->mSelector == kAVM_PropertyRateState) {
         *outIsSettable = true;
     } else if (AVM_DeviceIndex(inObjectID) >= 0) {
         *outIsSettable = (inAddress->mSelector == kAudioDevicePropertyNominalSampleRate);
@@ -1145,6 +1184,18 @@ static OSStatus AVM_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioOb
     if (inAddress->mSelector == kAVM_PropertyMatrix
         && (inObjectID == kObj_PlugIn || AVM_DeviceIndex(inObjectID) >= 0))
         return AVM_SetMatrixProperty(inDataSize, inData);
+
+    if (inAddress->mSelector == kAVM_PropertyRateState
+        && (inObjectID == kObj_PlugIn || AVM_DeviceIndex(inObjectID) >= 0)) {
+        if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+        CFPropertyListRef v = *((const CFPropertyListRef*)inData);
+        Float64 rate = 0;
+        if (v == NULL || CFGetTypeID(v) != CFNumberGetTypeID()
+            || !CFNumberGetValue((CFNumberRef)v, kCFNumberFloat64Type, &rate))
+            return kAudioHardwareIllegalOperationError;
+        if (rate == 0) rate = AVM_CurrentRate();
+        return AVM_RequestRateChange(rate);
+    }
 
     int dev = AVM_DeviceIndex(inObjectID);
     if (dev >= 0) {
@@ -1212,9 +1263,12 @@ static OSStatus AVM_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID i
 
     pthread_mutex_lock(&gClockMutex);
     // Durante un cambio de frecuencia no se arranca IO en ningún dispositivo.
+    // Tampoco mientras los dispositivos puedan estar a frecuencias distintas.
     avm_rate_status st = avm_rate_io_start(&gRate, (uint32_t)dev, AVM_NowNs());
     if (st != AVM_RATE_OK) {
         pthread_mutex_unlock(&gClockMutex);
+        if (st == AVM_RATE_INCONSISTENT)
+            os_log_error(gLog, "AVMatrix: audio bloqueado: frecuencias posiblemente distintas; recupere con 'avmctl recover'");
         return kAudioHardwareNotReadyError;
     }
     if (gRate.running_total == 1) {
