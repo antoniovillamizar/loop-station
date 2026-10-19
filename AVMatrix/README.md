@@ -2,7 +2,7 @@
 
 AV Matrix es un driver de audio virtual (AudioServerPlugIn de CoreAudio) con una matriz de enrutamiento. Sirve para medir con **Smaart** a través de **LISTENTO**: la referencia sale hacia Colombia y el retorno vuelve al mismo dispositivo que Smaart tiene seleccionado.
 
-La tarjeta **solo transporta y enruta audio**. No tiene ecualización, efectos, análisis ni delay ajustable. Smaart hace todo el análisis. El transporte usa un buffer interno, así que **la latencia no es cero** (ver «Retardo de transporte»).
+La tarjeta **transporta y enruta audio**, y su mixer solo **atenúa** (de 0 dB a silencio, sin amplificación). No tiene ecualización, efectos, análisis ni delay ajustable. Smaart hace todo el análisis. El transporte usa un buffer interno, así que **la latencia no es cero** (ver «Retardo de transporte»).
 
 > Estado: el código está compilado y las pruebas del núcleo pasan. **Todavía no se ha instalado ni probado en un Mac**: la compatibilidad con Smaart y LISTENTO está pendiente. Ver [`docs/INFORME_CODEX.md`](docs/INFORME_CODEX.md).
 
@@ -65,6 +65,24 @@ Los 34 canales se pueden renombrar desde la app: Smaart Salidas 1-8, LISTENTO Re
 - Los nombres aparecen en las cabeceras y en las descripciones de las rutas (por ejemplo, «Smaart Salida 1 «Generador rosa» → Smaart Entrada 8 «Señal de referencia» (referencia local)»). Admiten español, tildes y eñes, hasta 32 caracteres.
 - Se guardan en `~/Library/Application Support/AV Matrix/nombres_canales.txt` (UTF-8, guardado atómico). Se conservan al cerrar la app, al reiniciar el Mac y al actualizar o reinstalar AV Matrix; el desinstalador no lo borra. Cada nombre se identifica por dispositivo, dirección y número: `smaart.out.1-8`, `listento.out.1-8`, `music.out.1-2`, `smaart.in.1-8` y `listento.in.1-8`.
 - **Renombrar solo cambia el texto que muestra la app.** No toca el driver, las conexiones, la numeración interna, los niveles ni el funcionamiento. Smaart y LISTENTO siguen viendo los nombres de canal del driver.
+
+### Mixer
+
+El botón **Mixer** de la barra superior abre una ventana con una tira por canal: número y nombre personalizado, medidor, **fader de volumen con lectura en dB** y botón **MUTE**.
+
+| Sección | Canales | Dónde actúa el volumen |
+| --- | --- | --- |
+| **ENTRADAS A LA MATRIZ** | Smaart Salidas 1-8, LISTENTO Retornos 1-8, Música L/R | **Antes de la matriz**: afecta a todos los destinos conectados a ese canal |
+| **SALIDAS DE LA MATRIZ** | Smaart Entradas 1-8, LISTENTO Envíos 1-8 | **Después del enrutamiento y la suma**: solo a ese destino |
+
+- **Solo atenúa:** el fader va de **0 dB** (arriba; la señal pasa idéntica bit a bit) a **silencio** (abajo, «−∞»). El driver rechaza cualquier ganancia mayor que 1. Escala cúbica: −6 dB hacia el 79 % del recorrido, −20 dB al 46 %. Doble clic u Opción+clic: 0 dB.
+- **MUTE** silencia el canal (silencio +0 exacto) sin cambiar su volumen. **«Silenciar todos»** activa los 34 MUTE. **«Restaurar 0 dB y quitar mutes…»** vuelve todo a 0 dB sin MUTE (pide confirmación).
+- **Sin chasquidos ni retardo:** cada cambio llega al nuevo nivel con una **rampa lineal de 512 muestras** (≈ 10,7 ms a 48 kHz), muestra a muestra dentro del bloque que ya se procesa. El hilo de audio no se bloquea: el control solo publica una ganancia objetivo atómica por canal.
+- **Medidores:** los de las fuentes muestran el nivel **después** de su volumen y MUTE (antes de la matriz); los de los destinos, después de la suma y de su volumen y MUTE. Valen igual en la ventana principal y en el mixer.
+- **Persistencia:** los ajustes se guardan **en el driver** (propiedad `'mixr'`, almacenamiento de coreaudiod), como la matriz: se conservan al cerrar la app y al reiniciar el Mac. Una instalación nueva empieza con todo a 0 dB y sin MUTE.
+- La línea de estado de la ventana principal avisa en naranja si hay canales atenuados o en MUTE.
+- **Medición con Smaart:** deje a 0 dB y sin MUTE Smaart Salida 1, LISTENTO Envío 1 y Retorno 1, y Smaart Entradas 1 y 8. Un volumen distinto en la referencia o en la medición desplaza la curva de magnitud de Smaart esos dB; bajar Salida 1 baja a la vez envío y referencia (la curva no cambia, pero hay menos relación señal/ruido). Ver Ayuda → Mixer.
+- Terminal: `avmctl mixer` (ver), `avmctl mixer reset`, `avmctl mixer gain smaart.in.1 -6`, `avmctl mixer mute listento.in.3 on`.
 
 ### Medidores de nivel
 
@@ -167,6 +185,10 @@ avmctl preset default | direct | clear   (default = medición)
 avmctl rate 44100 | 48000 | 96000
 avmctl recover                      repara una frecuencia inconsistente (sin audio activo)
 avmctl meters [--watch]             medidores de nivel de los 34 canales (no abre audio)
+avmctl mixer                        volumen y MUTE de los 34 canales
+avmctl mixer reset                  todos a 0 dB y sin MUTE
+avmctl mixer gain <canal> <dB|-inf> solo atenuación (0 dB o menos)
+avmctl mixer mute <canal> on|off
 avmctl format smaart in s24         (smaart|listento|music, in|out, f32|s32|s24|s16)
 avmctl test                         autoprueba a la frecuencia actual
 avmctl test-all                     autoprueba en 3 frecuencias x 4 formatos (~1 min)

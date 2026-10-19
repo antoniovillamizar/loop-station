@@ -108,6 +108,22 @@ static void test_topics(void)
         { "silencios a 96 kHz",              "A 96 kHz hay silencios pendientes" },
         { "sin internet",                    "funciona sin internet" },
         { "nombres completos al pasar el ratón", "se ve completo" },
+        { "mixer: botón y ventana",          "El botón Mixer de la barra superior abre una ventana" },
+        { "mixer: entradas a la matriz",     "ENTRADAS A LA MATRIZ" },
+        { "mixer: salidas de la matriz",     "SALIDAS DE LA MATRIZ" },
+        { "mixer: antes de la matriz",       "El volumen actúa antes de la matriz" },
+        { "mixer: después de la suma",       "El volumen actúa después del enrutamiento y la suma" },
+        { "mixer: solo atenúa",              "No se puede amplificar" },
+        { "mixer: MUTE",                     "MUTE silencia el canal sin cambiar su volumen" },
+        { "mixer: silenciar todos",          "«Silenciar todos»" },
+        { "mixer: restaurar",                "«Restaurar 0 dB y quitar mutes…»" },
+        { "mixer: sin chasquidos",           "sin chasquidos ni retardo añadido" },
+        { "mixer: se guarda",                "se conservan al cerrar la app y al reiniciar el Mac" },
+        { "mixer: instalación nueva",        "En una instalación nueva todos los canales están a 0 dB y sin MUTE" },
+        { "mixer y Smaart: magnitud",        "la curva de magnitud de Smaart se desplaza exactamente esos dB" },
+        { "mixer y Smaart: referencia",      "Bajar Smaart Salida 1" },
+        { "mixer y Smaart: MUTE",            "Un MUTE en la referencia o en la medición" },
+        { "medidores tras el mixer",         "Los medidores muestran el nivel resultante del mixer" },
     };
     for (size_t i = 0; i < sizeof(req) / sizeof(req[0]); i++)
         CHECK(find(req[i].needle) >= 0, "el manual explica: %s («%s»)", req[i].topic, req[i].needle);
@@ -119,6 +135,8 @@ static void test_topics(void)
     CHECK(in_section("medidores", "2 segundos"), "saturación mantenida 2 s");
     CHECK(in_section("medidores", "0,25 s"), "inactividad a 0,25 s");
     CHECK(in_section("nombres", "32 caracteres"), "límite de 32 caracteres");
+    CHECK(in_section("mixer", "0 dB") && in_section("referencia", "Mixer"), "la referencia en Smaart remite al mixer");
+    CHECK(find("No tiene ecualización, efectos, análisis, ganancias") < 0, "el manual ya no dice que no hay control de nivel");
     CHECK(in_section("limitaciones", "verificado"), "no presenta como verificada la compatibilidad ni la medición por internet");
     // La interfaz ya no tiene el distintivo naranja: el manual no lo menciona.
     CHECK(find("REFERENCIA LOCAL") < 0, "sin el rótulo «REFERENCIA LOCAL» en mayúsculas");

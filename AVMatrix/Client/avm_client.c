@@ -118,6 +118,38 @@ OSStatus avm_get_meters(avm_meter_reading src[AVM_NUM_SOURCES], avm_meter_readin
     return ok ? noErr : kAudioHardwareBadPropertySizeError;
 }
 
+OSStatus avm_get_mixer(avm_mixer* out)
+{
+    AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);
+    if (dev == kAudioObjectUnknown) return kAudioHardwareBadDeviceError;
+    AudioObjectPropertyAddress a = { AVM_PROPERTY_MIXER, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFPropertyListRef plist = NULL;
+    UInt32 size = sizeof(plist);
+    OSStatus err = AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &plist);
+    if (err != noErr) return err;
+    if (plist == NULL) return kAudioHardwareUnspecifiedError;
+    bool ok = CFGetTypeID(plist) == CFDataGetTypeID()
+        && avm_mixer_unpack(CFDataGetBytePtr((CFDataRef)plist), (size_t)CFDataGetLength((CFDataRef)plist), out);
+    CFRelease(plist);
+    return ok ? noErr : kAudioHardwareBadPropertySizeError;
+}
+
+OSStatus avm_set_mixer(const avm_mixer* mx)
+{
+    AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);
+    if (dev == kAudioObjectUnknown) return kAudioHardwareBadDeviceError;
+    if (!avm_mixer_is_valid(mx)) return kAudioHardwareIllegalOperationError;
+    UInt8 blob[AVM_MIXER_BLOB_SIZE];
+    avm_mixer_pack(mx, blob);
+    CFDataRef data = CFDataCreate(NULL, blob, sizeof(blob));
+    if (data == NULL) return kAudioHardwareUnspecifiedError;
+    AudioObjectPropertyAddress a = { AVM_PROPERTY_MIXER, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFPropertyListRef plist = data;
+    OSStatus err = AudioObjectSetPropertyData(dev, &a, 0, NULL, sizeof(plist), &plist);
+    CFRelease(data);
+    return err;
+}
+
 OSStatus avm_get_sample_rate(Float64* out)
 {
     AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);

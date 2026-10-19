@@ -22,6 +22,7 @@
 #include "../Client/avm_client.h"
 #include "../Client/avm_names.h"
 #include "avm_manual.h"
+#include "avm_fader.h"
 
 static const double kRates[3] = { 44100.0, 48000.0, 96000.0 };
 
@@ -229,8 +230,9 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     return [NSString stringWithFormat:@"%.0f", db];
 }
 
-// Barra de nivel en `r` (horizontal o vertical, crece hacia la derecha o hacia arriba).
-- (void)drawMeterBar:(NSRect)r reading:(avm_meter_reading)m vertical:(BOOL)vertical
+// Barra de nivel en `r` (horizontal o vertical, crece hacia la derecha o hacia
+// arriba). La comparten la matriz y el mixer.
+static void AVMDrawMeterBar(NSRect r, avm_meter_reading m, BOOL vertical)
 {
     [[[NSColor labelColor] colorWithAlphaComponent:0.10] setFill];
     NSRectFillUsingOperation(r, NSCompositingOperationSourceOver);
@@ -261,7 +263,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     }
 }
 
-- (void)drawClipLED:(NSRect)r on:(BOOL)on active:(BOOL)active
+static void AVMDrawClipLED(NSRect r, BOOL on, BOOL active)
 {
     NSBezierPath* p = [NSBezierPath bezierPathWithOvalInRect:r];
     if (on) {
@@ -273,6 +275,9 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
         [p stroke];
     }
 }
+
+- (void)drawMeterBar:(NSRect)r reading:(avm_meter_reading)m vertical:(BOOL)vertical { AVMDrawMeterBar(r, m, vertical); }
+- (void)drawClipLED:(NSRect)r on:(BOOL)on active:(BOOL)active { AVMDrawClipLED(r, on, active); }
 
 - (void)setEnabled:(BOOL)enabled
 {
@@ -1159,6 +1164,465 @@ static NSAttributedString* ManualText(NSRange* ranges, int maxRanges)
 @end
 
 // ---------------------------------------------------------------------------
+#pragma mark Mixer
+
+// Ventana «Mixer»: volumen (solo atenuación, de 0 dB a silencio) y MUTE de cada
+// canal. ENTRADAS A LA MATRIZ = las 18 fuentes (el volumen actúa antes de la
+// matriz); SALIDAS DE LA MATRIZ = los 16 destinos (después del enrutamiento y la
+// suma). Los ajustes viven en el driver (propiedad 'mixr'), que los guarda y
+// aplica sin chasquidos (rampas de AVM_GAIN_RAMP_FRAMES muestras). Los medidores
+// muestran el nivel resultante de esos controles.
+
+static const CGFloat kStripW = 60.0, kStripH = 284.0;
+static const CGFloat kStripMeterH = 150.0;
+
+// Medidor vertical con el LED de saturación arriba.
+@interface AVMMeterView : NSView
+@property (nonatomic, assign) avm_meter_reading reading;
+@end
+
+@implementation AVMMeterView
+- (BOOL)isFlipped { return YES; }
+- (void)setReading:(avm_meter_reading)r
+{
+    if (r.active == _reading.active && r.clip == _reading.clip && r.peak == _reading.peak) return;
+    _reading = r;
+    [self setNeedsDisplay:YES];
+}
+- (void)drawRect:(NSRect)dirty
+{
+    (void)dirty;
+    NSRect b = self.bounds;
+    AVMDrawClipLED(NSMakeRect(NSMidX(b) - 4, 0, 8, 8), _reading.clip, _reading.active);
+    AVMDrawMeterBar(NSMakeRect(0, 12, b.size.width, b.size.height - 12), _reading, YES);
+}
+@end
+
+// Fader vertical. Doble clic u Opción+clic: vuelve a 0 dB.
+@interface AVMFader : NSSlider
+@end
+
+@implementation AVMFader
+- (void)mouseDown:(NSEvent*)e
+{
+    if (e.clickCount == 2 || (e.modifierFlags & NSEventModifierFlagOption)) {
+        self.doubleValue = 1.0;
+        [self sendAction:self.action to:self.target];
+        return;
+    }
+    [super mouseDown:e];
+}
+@end
+
+// Tira de un canal: número, nombre, medidor, fader con lectura en dB y MUTE.
+@interface AVMMixerStrip : NSView
+@property (assign) int index;                 // índice de avm_names (fuentes 0-17, destinos 18-33)
+@property (strong) NSTextField* number;
+@property (strong) NSTextField* name;
+@property (strong) AVMMeterView* meter;
+@property (strong) AVMFader* fader;
+@property (strong) NSTextField* gainLabel;
+@property (strong) NSTextField* peakLabel;
+@property (strong) NSButton* mute;
+- (void)showGain:(float)gain mute:(BOOL)muted;
+- (void)refreshName;
+@end
+
+@implementation AVMMixerStrip
+
+- (BOOL)isFlipped { return YES; }
+
+- (instancetype)initWithIndex:(int)idx target:(id)target
+{
+    if ((self = [super initWithFrame:NSMakeRect(0, 0, kStripW, kStripH)])) {
+        _index = idx;
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.widthAnchor constraintEqualToConstant:kStripW].active = YES;
+        [self.heightAnchor constraintEqualToConstant:kStripH].active = YES;
+
+        _number = [NSTextField labelWithString:ChannelNumber(idx)];
+        _number.font = [NSFont boldSystemFontOfSize:12];
+        _number.alignment = NSTextAlignmentCenter;
+        _number.frame = NSMakeRect(0, 2, kStripW, 16);
+
+        _name = [NSTextField wrappingLabelWithString:@""];
+        _name.font = [NSFont systemFontOfSize:10];
+        _name.alignment = NSTextAlignmentCenter;
+        _name.maximumNumberOfLines = 2;
+        _name.cell.truncatesLastVisibleLine = YES;
+        _name.frame = NSMakeRect(1, 18, kStripW - 2, 28);
+
+        _meter = [[AVMMeterView alloc] initWithFrame:NSMakeRect(9, 50, 10, kStripMeterH + 12)];
+
+        _fader = [[AVMFader alloc] initWithFrame:NSMakeRect(24, 56, 28, kStripMeterH + 2)];
+        _fader.vertical = YES;
+        _fader.minValue = 0.0;
+        _fader.maxValue = 1.0;
+        _fader.doubleValue = 1.0;
+        _fader.continuous = YES;
+        _fader.target = target;
+        _fader.action = @selector(faderMoved:);
+        _fader.tag = idx;
+        _fader.toolTip = @"Volumen (solo atenúa: de 0 dB a silencio). Doble clic u Opción+clic: 0 dB.";
+
+        _gainLabel = [NSTextField labelWithString:@"0.0 dB"];
+        _gainLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightMedium];
+        _gainLabel.alignment = NSTextAlignmentCenter;
+        _gainLabel.frame = NSMakeRect(0, 216, kStripW, 16);
+
+        _peakLabel = [NSTextField labelWithString:@"—"];
+        _peakLabel.font = [NSFont monospacedDigitSystemFontOfSize:9 weight:NSFontWeightRegular];
+        _peakLabel.textColor = [NSColor secondaryLabelColor];
+        _peakLabel.alignment = NSTextAlignmentCenter;
+        _peakLabel.frame = NSMakeRect(0, 232, kStripW, 13);
+        _peakLabel.toolTip = @"Nivel de pico (dBFS) después del volumen y el MUTE.";
+
+        _mute = [NSButton buttonWithTitle:@"MUTE" target:target action:@selector(muteToggled:)];
+        [_mute setButtonType:NSButtonTypePushOnPushOff];
+        _mute.bezelStyle = NSBezelStyleRegularSquare;
+        _mute.tag = idx;
+        _mute.font = [NSFont boldSystemFontOfSize:11];
+        _mute.frame = NSMakeRect(5, 250, kStripW - 10, 26);
+        _mute.toolTip = @"MUTE: silencia este canal sin cambiar su volumen.";
+
+        for (NSView* v in @[ _number, _name, _meter, _fader, _gainLabel, _peakLabel, _mute ]) [self addSubview:v];
+        [self refreshName];
+    }
+    return self;
+}
+
+- (void)refreshName
+{
+    NSString* shown = ChannelAlias(self.index) ?: ChannelDefault(self.index);
+    NSString* full = self.index < AVM_NUM_SOURCES ? SourceLongName(self.index) : DestLongName(self.index - AVM_NUM_SOURCES);
+    self.name.stringValue = shown;
+    self.name.toolTip = [NSString stringWithFormat:@"%@ · %@\n%@", ChannelNumber(self.index), shown, full];
+    self.number.toolTip = self.name.toolTip;
+}
+
+- (void)showGain:(float)gain mute:(BOOL)muted
+{
+    double pos = avm_fader_pos_from_gain(gain);
+    if (fabs(self.fader.doubleValue - pos) > 1e-9 && avm_fader_gain_from_pos(self.fader.doubleValue) != gain)
+        self.fader.doubleValue = pos;
+    char b[32];
+    avm_fader_format(gain, b, sizeof(b));
+    self.gainLabel.stringValue = UTF8(b);
+    self.gainLabel.textColor = gain < 1.0f ? [NSColor systemOrangeColor] : [NSColor labelColor];
+    self.mute.state = muted ? NSControlStateValueOn : NSControlStateValueOff;
+    self.mute.bezelColor = muted ? [NSColor systemRedColor] : nil;
+    self.mute.attributedTitle = [[NSAttributedString alloc] initWithString:@"MUTE" attributes:@{
+        NSFontAttributeName: [NSFont boldSystemFontOfSize:11],
+        NSForegroundColorAttributeName: muted ? [NSColor whiteColor] : [NSColor labelColor] }];
+    self.name.textColor = muted ? [NSColor tertiaryLabelColor] : [NSColor labelColor];
+}
+
+- (void)showReading:(avm_meter_reading)r
+{
+    self.meter.reading = r;
+    self.peakLabel.stringValue = LevelText(r, YES);
+}
+
+@end
+
+@interface AVMMixerController : NSObject <NSWindowDelegate>
+@property (strong) NSWindow* window;
+@property (strong) NSTextField* statusLabel;
+@property (strong) NSButton* muteAllButton;
+@property (strong) NSButton* restoreButton;
+@property (assign) BOOL offline;          // pruebas: nunca habla con el driver
+@property (assign) BOOL connected;        // hay driver y se pudo leer el mixer
+@property (assign) NSUInteger sendCount;  // envíos al driver (diagnóstico y pruebas)
+@property (copy) void (^onChange)(void);  // la ventana principal actualiza su estado
+- (void)show;
+- (void)reloadFromDriver;
+- (void)setMeterSources:(const avm_meter_reading*)src dests:(const avm_meter_reading*)dst;
+- (void)namesChanged;
+- (void)muteAll:(id)sender;
+- (void)restoreUnityConfirmed;
+- (avm_mixer)mixer;
+- (AVMMixerStrip*)stripForIndex:(int)idx;
+- (void)faderMoved:(NSSlider*)sender;
+- (void)muteToggled:(NSButton*)sender;
+- (void)flush;
+@end
+
+@implementation AVMMixerController {
+    avm_mixer _mx;
+    AVMMixerStrip* _strips[AVM_NAMES_COUNT];
+    NSTimer* _sendTimer;
+}
+
+- (instancetype)init
+{
+    if ((self = [super init])) avm_mixer_default(&_mx);
+    return self;
+}
+
+- (avm_mixer)mixer { return _mx; }
+- (AVMMixerStrip*)stripForIndex:(int)idx { return (idx >= 0 && idx < AVM_NAMES_COUNT) ? _strips[idx] : nil; }
+
+static NSTextField* SectionTitle(NSString* t)
+{
+    NSTextField* f = [NSTextField labelWithString:t];
+    f.font = [NSFont boldSystemFontOfSize:13];
+    return f;
+}
+
+// Un grupo de tiras (p. ej. «Smaart · Salidas»), con su nombre encima.
+- (NSView*)groupTitled:(NSString*)title first:(int)first count:(int)count
+{
+    NSMutableArray* strips = [NSMutableArray array];
+    for (int i = 0; i < count; i++) {
+        AVMMixerStrip* st = [[AVMMixerStrip alloc] initWithIndex:first + i target:self];
+        _strips[first + i] = st;
+        [strips addObject:st];
+    }
+    NSStackView* row = [NSStackView stackViewWithViews:strips];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.spacing = 2;
+    NSTextField* t = [NSTextField labelWithString:title];
+    t.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+    t.textColor = [NSColor secondaryLabelColor];
+    NSStackView* g = [NSStackView stackViewWithViews:@[ t, row ]];
+    g.orientation = NSUserInterfaceLayoutOrientationVertical;
+    g.alignment = NSLayoutAttributeLeading;
+    g.spacing = 3;
+    return g;
+}
+
+- (NSView*)sectionTitled:(NSString*)title note:(NSString*)note groups:(NSArray<NSView*>*)groups
+{
+    NSStackView* row = [NSStackView stackViewWithViews:groups];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.alignment = NSLayoutAttributeTop;
+    row.spacing = 16;
+    NSTextField* n = [NSTextField labelWithString:note];
+    n.font = [NSFont systemFontOfSize:10];
+    n.textColor = [NSColor secondaryLabelColor];
+    NSStackView* sec = [NSStackView stackViewWithViews:@[ SectionTitle(title), n, row ]];
+    sec.orientation = NSUserInterfaceLayoutOrientationVertical;
+    sec.alignment = NSLayoutAttributeLeading;
+    sec.spacing = 4;
+    return sec;
+}
+
+- (void)build
+{
+    self.muteAllButton = [NSButton buttonWithTitle:@"Silenciar todos" target:self action:@selector(muteAll:)];
+    self.muteAllButton.toolTip = @"Activa el MUTE de los 34 canales (los volúmenes se conservan).";
+    self.restoreButton = [NSButton buttonWithTitle:@"Restaurar 0 dB y quitar mutes…" target:self action:@selector(restoreUnity:)];
+    self.restoreButton.toolTip = @"Pone los 34 canales a 0 dB y quita todos los MUTE (pide confirmación).";
+    NSButton* help = [NSButton buttonWithTitle:@"Ayuda del mixer" target:self action:@selector(showMixerHelp:)];
+    for (NSButton* b in @[ self.muteAllButton, self.restoreButton, help ]) b.controlSize = NSControlSizeSmall, b.font = [NSFont systemFontOfSize:11];
+    self.statusLabel = [NSTextField labelWithString:@" "];
+    self.statusLabel.font = [NSFont systemFontOfSize:11];
+    self.statusLabel.textColor = [NSColor secondaryLabelColor];
+    NSStackView* bar = [NSStackView stackViewWithViews:@[ self.muteAllButton, self.restoreButton, help, self.statusLabel ]];
+    bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    bar.spacing = 8;
+
+    NSView* inputs = [self sectionTitled:@"ENTRADAS A LA MATRIZ"
+                                    note:@"El volumen actúa antes de la matriz: afecta a todos los destinos conectados a ese canal."
+                                  groups:@[ [self groupTitled:@"Smaart · Salidas" first:avm_names_src_index(AVM_SRC_SMAART_BASE) count:8],
+                                            [self groupTitled:@"LISTENTO · Retornos" first:avm_names_src_index(AVM_SRC_LINK_BASE) count:8],
+                                            [self groupTitled:@"Música" first:avm_names_src_index(AVM_SRC_MUSIC_BASE) count:2] ]];
+    NSView* outputs = [self sectionTitled:@"SALIDAS DE LA MATRIZ"
+                                     note:@"El volumen actúa después del enrutamiento y la suma: solo afecta a ese destino."
+                                   groups:@[ [self groupTitled:@"Smaart · Entradas" first:avm_names_dst_index(AVM_DST_SMAART_BASE) count:8],
+                                             [self groupTitled:@"LISTENTO · Envíos" first:avm_names_dst_index(AVM_DST_LINK_BASE) count:8] ]];
+    NSBox* sep = [[NSBox alloc] init];
+    sep.boxType = NSBoxSeparator;
+
+    NSStackView* content = [NSStackView stackViewWithViews:@[ bar, inputs, sep, outputs ]];
+    content.orientation = NSUserInterfaceLayoutOrientationVertical;
+    content.alignment = NSLayoutAttributeLeading;
+    content.spacing = 10;
+    content.edgeInsets = NSEdgeInsetsMake(12, 12, 12, 12);
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [sep.widthAnchor constraintEqualToAnchor:content.widthAnchor constant:-24].active = YES;
+
+    // Documento con desplazamiento (la ventana puede ser más pequeña que el mixer).
+    NSView* doc = [[NSView alloc] initWithFrame:NSZeroRect];
+    [doc addSubview:content];
+    [NSLayoutConstraint activateConstraints:@[
+        [content.leadingAnchor constraintEqualToAnchor:doc.leadingAnchor],
+        [content.topAnchor constraintEqualToAnchor:doc.topAnchor],
+    ]];
+    NSSize fit = content.fittingSize;
+    doc.frame = NSMakeRect(0, 0, fit.width, fit.height);
+    NSScrollView* scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, fit.width, fit.height)];
+    scroll.hasVerticalScroller = YES;
+    scroll.hasHorizontalScroller = YES;
+    scroll.autohidesScrollers = YES;
+    scroll.drawsBackground = NO;
+    scroll.documentView = doc;
+    scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    // Con el origen arriba: el documento se ancla al borde superior.
+    [doc scrollPoint:NSMakePoint(0, fit.height)];
+
+    NSRect screen = [NSScreen mainScreen].visibleFrame;
+    NSSize win = NSMakeSize(MIN(fit.width, screen.size.width - 40), MIN(fit.height, screen.size.height - 60));
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, win.width, win.height)
+                                              styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                                                backing:NSBackingStoreBuffered defer:NO];
+    self.window.title = @"Mixer — AV Matrix";
+    self.window.releasedWhenClosed = NO;
+    self.window.delegate = self;
+    self.window.minSize = NSMakeSize(480, 320);
+    self.window.contentMaxSize = fit;
+    scroll.frame = self.window.contentView.bounds;
+    [self.window.contentView addSubview:scroll];
+    [self.window center];
+    self.window.frameAutosaveName = @"AVMatrixMixer";
+}
+
+- (void)show
+{
+    if (!self.window) [self build];
+    [self reloadFromDriver];
+    [self.window makeKeyAndOrderFront:nil];
+}
+
+- (void)applyToUI
+{
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) [_strips[i] showGain:_mx.src_gain[i] mute:_mx.src_mute[i]];
+    for (int d = 0; d < AVM_NUM_DESTS; d++) [_strips[AVM_NUM_SOURCES + d] showGain:_mx.dst_gain[d] mute:_mx.dst_mute[d]];
+    int muted = 0, att = 0;
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) { muted += _mx.src_mute[i]; att += _mx.src_gain[i] < 1.0f; }
+    for (int d = 0; d < AVM_NUM_DESTS; d++) { muted += _mx.dst_mute[d]; att += _mx.dst_gain[d] < 1.0f; }
+    if (!self.connected && !self.offline)
+        self.statusLabel.stringValue = @"Driver no encontrado: el mixer no está disponible.";
+    else if (muted == 0 && att == 0)
+        self.statusLabel.stringValue = @"Todos los canales a 0 dB y sin MUTE (audio sin tocar).";
+    else
+        self.statusLabel.stringValue = [NSString stringWithFormat:@"%d en MUTE · %d atenuados", muted, att];
+    BOOL on = self.connected || self.offline;
+    for (int i = 0; i < AVM_NAMES_COUNT; i++) { _strips[i].fader.enabled = on; _strips[i].mute.enabled = on; }
+    self.muteAllButton.enabled = on;
+    self.restoreButton.enabled = on;
+}
+
+// Lee los ajustes del driver. No pisa un cambio local que aún no se ha enviado.
+- (void)reloadFromDriver
+{
+    if (self.offline) { [self applyToUI]; return; }
+    if (_sendTimer) return;
+    avm_mixer mx;
+    self.connected = avm_find_device(AVM_DEV_SMAART) != kAudioObjectUnknown && avm_get_mixer(&mx) == noErr;
+    if (self.connected) _mx = mx;
+    [self applyToUI];
+}
+
+// Envío agrupado: un movimiento del fader genera muchos eventos; se envía como
+// mucho cada 30 ms el último valor (el driver hace la rampa sin chasquidos).
+- (void)scheduleSend
+{
+    [self applyToUI];
+    if (_sendTimer) return;
+    __weak AVMMixerController* weakSelf = self;
+    _sendTimer = [NSTimer timerWithTimeInterval:0.03 repeats:NO block:^(NSTimer* t) {
+        (void)t;
+        [weakSelf flush];
+    }];
+    // También mientras se arrastra el fader (modo de seguimiento de eventos).
+    [[NSRunLoop currentRunLoop] addTimer:_sendTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)flush
+{
+    [_sendTimer invalidate];
+    _sendTimer = nil;
+    self.sendCount++;
+    if (!self.offline) {
+        OSStatus err = avm_set_mixer(&_mx);
+        if (err != noErr) {
+            self.statusLabel.stringValue = [NSString stringWithFormat:@"El driver rechazó el ajuste (error %d).", (int)err];
+            [self reloadFromDriver];
+            return;
+        }
+    }
+    if (self.onChange) self.onChange();
+}
+
+- (void)faderMoved:(NSSlider*)sender
+{
+    int idx = (int)sender.tag;
+    float g = avm_fader_gain_from_pos(sender.doubleValue);
+    if (idx < AVM_NUM_SOURCES) _mx.src_gain[idx] = g;
+    else _mx.dst_gain[idx - AVM_NUM_SOURCES] = g;
+    [self scheduleSend];
+}
+
+- (void)muteToggled:(NSButton*)sender
+{
+    int idx = (int)sender.tag;
+    uint8_t on = sender.state == NSControlStateValueOn;
+    if (idx < AVM_NUM_SOURCES) _mx.src_mute[idx] = on;
+    else _mx.dst_mute[idx - AVM_NUM_SOURCES] = on;
+    [self scheduleSend];
+    [self flush];   // el MUTE se aplica al momento
+}
+
+- (void)muteAll:(id)sender
+{
+    (void)sender;
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) _mx.src_mute[i] = 1;
+    for (int d = 0; d < AVM_NUM_DESTS; d++) _mx.dst_mute[d] = 1;
+    [self scheduleSend];
+    [self flush];
+}
+
+- (void)restoreUnityConfirmed
+{
+    avm_mixer_default(&_mx);
+    [self scheduleSend];
+    [self flush];
+}
+
+- (void)restoreUnity:(id)sender
+{
+    (void)sender;
+    NSAlert* a = [[NSAlert alloc] init];
+    a.messageText = @"¿Restaurar todos los canales a 0 dB y quitar los MUTE?";
+    a.informativeText = @"Los 34 canales vuelven a 0 dB sin MUTE: el audio pasa sin tocar. Si había canales en MUTE o atenuados, pueden sonar más fuerte de inmediato.";
+    [a addButtonWithTitle:@"Restaurar"];
+    [a addButtonWithTitle:@"Cancelar"];
+    __weak AVMMixerController* weakSelf = self;
+    [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+        if (r == NSAlertFirstButtonReturn) [weakSelf restoreUnityConfirmed];
+    }];
+}
+
+- (void)showMixerHelp:(id)sender
+{
+    (void)sender;
+    [NSApp sendAction:@selector(showMixerManual:) to:nil from:self];
+}
+
+- (void)setMeterSources:(const avm_meter_reading*)src dests:(const avm_meter_reading*)dst
+{
+    if (!self.window.visible) return;
+    avm_meter_reading none = { 0.0f, false, false };
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) [_strips[i] showReading:src ? src[i] : none];
+    for (int d = 0; d < AVM_NUM_DESTS; d++) [_strips[AVM_NUM_SOURCES + d] showReading:dst ? dst[d] : none];
+}
+
+- (void)namesChanged
+{
+    for (int i = 0; i < AVM_NAMES_COUNT; i++) [_strips[i] refreshName];
+}
+
+// Al cerrar la ventana se envía cualquier cambio pendiente.
+- (void)windowWillClose:(NSNotification*)n
+{
+    (void)n;
+    if (_sendTimer) [self flush];
+}
+
+@end
+
+// ---------------------------------------------------------------------------
 #pragma mark Controlador
 
 @interface AVMController : NSObject <NSApplicationDelegate, NSWindowDelegate, AVMMatrixViewDelegate, NSPopoverDelegate>
@@ -1176,6 +1640,7 @@ static NSAttributedString* ManualText(NSRange* ranges, int maxRanges)
 @property (strong) NSTimer* meterTimer;
 @property (strong) NSPopover* renamePopover;   // panel abierto; se suelta al cerrarse
 @property (strong) AVMHelpController* help;    // ventana del manual (se crea al abrirla)
+@property (strong) AVMMixerController* mixer;  // ventana del mixer (se crea al abrirla)
 @end
 
 static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
@@ -1207,22 +1672,28 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 - (void)startMeters
 {
     __weak AVMController* weakSelf = self;
-    self.meterTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 15.0 repeats:YES block:^(NSTimer* t) {
+    self.meterTimer = [NSTimer timerWithTimeInterval:1.0 / 15.0 repeats:YES block:^(NSTimer* t) {
         (void)t;
         [weakSelf pollMeters];
     }];
+    // Los medidores siguen moviéndose mientras se arrastra un fader.
+    [[NSRunLoop currentRunLoop] addTimer:self.meterTimer forMode:NSRunLoopCommonModes];
     self.meterTimer.tolerance = 0.01;
 }
 
 - (void)pollMeters
 {
-    if (!(self.window.occlusionState & NSWindowOcclusionStateVisible)) return;
+    BOOL mainVisible = (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+    BOOL mixerVisible = self.mixer.window.visible && (self.mixer.window.occlusionState & NSWindowOcclusionStateVisible);
+    if (!mainVisible && !mixerVisible) return;
     avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
     if (avm_find_device(AVM_DEV_SMAART) == kAudioObjectUnknown || avm_get_meters(s, d) != noErr) {
         [self.matrixView setMeterSources:NULL dests:NULL];   // todo «—»: nunca valores antiguos
+        [self.mixer setMeterSources:NULL dests:NULL];
         return;
     }
-    [self.matrixView setMeterSources:s dests:d];
+    if (mainVisible) [self.matrixView setMeterSources:s dests:d];
+    if (mixerVisible) [self.mixer setMeterSources:s dests:d];
 }
 
 - (void)applicationWillTerminate:(NSNotification*)note
@@ -1276,15 +1747,17 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     NSButton* reloadBtn = [NSButton buttonWithTitle:@"Recargar" target:self action:@selector(reloadPressed:)];
     self.recoverButton = [NSButton buttonWithTitle:@"Reparar frecuencia" target:self action:@selector(recoverPressed:)];
     self.recoverButton.hidden = YES;
+    NSButton* mixerBtn = [NSButton buttonWithTitle:@"Mixer" target:self action:@selector(showMixer:)];
+    mixerBtn.toolTip = @"Volumen (solo atenuación) y MUTE de cada canal: entradas antes de la matriz, salidas después de la suma.";
     NSButton* helpBtn = [NSButton buttonWithTitle:@"Ayuda" target:self action:@selector(showHelp:)];
     helpBtn.toolTip = @"Manual de AV Matrix: dispositivos, matriz, presets, medidores, nombres, frecuencias y problemas.";
-    for (NSButton* b in @[ measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton, helpBtn ])
+    for (NSButton* b in @[ measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton, mixerBtn, helpBtn ])
         b.controlSize = NSControlSizeSmall, b.font = [NSFont systemFontOfSize:11];
     self.ratePopup.controlSize = NSControlSizeSmall;
     self.ratePopup.font = [NSFont systemFontOfSize:11];
 
     NSStackView* toolbar = [NSStackView stackViewWithViews:@[ Label(@"AV Matrix", 14, YES), Label(@"Frecuencia:", 11, NO), self.ratePopup,
-                                                              measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton, helpBtn ]];
+                                                              measureBtn, directBtn, clearBtn, openBtn, foldBtn, reloadBtn, self.recoverButton, mixerBtn, helpBtn ]];
     toolbar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     toolbar.spacing = 6;
 
@@ -1396,9 +1869,20 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     else if (health == AVM_RATE_HEALTH_CHANGING)
         [parts addObject:@"cambio de frecuencia en curso"];
     self.statusLabel.textColor = health == AVM_RATE_HEALTH_INCONSISTENT ? [NSColor systemRedColor] : [NSColor secondaryLabelColor];
-    self.statusLabel.stringValue = parts.count
+    NSString* text = parts.count
         ? [parts componentsJoinedByString:@", "]
         : [NSString stringWithFormat:@"AV Matrix Smaart · AV Matrix LISTENTO · AV Matrix Música — %.1f kHz", rate / 1000.0];
+    // Aviso del mixer: un canal atenuado o en MUTE cambia lo que llega a Smaart.
+    avm_mixer mx;
+    if (avm_get_mixer(&mx) == noErr && !avm_mixer_is_unity(&mx)) {
+        int muted = 0, att = 0;
+        for (int i = 0; i < AVM_NUM_SOURCES; i++) { muted += mx.src_mute[i]; att += mx.src_gain[i] < 1.0f; }
+        for (int i = 0; i < AVM_NUM_DESTS; i++) { muted += mx.dst_mute[i]; att += mx.dst_gain[i] < 1.0f; }
+        text = [text stringByAppendingFormat:@" · Mixer: %d en MUTE, %d atenuados", muted, att];
+        if (health != AVM_RATE_HEALTH_INCONSISTENT) self.statusLabel.textColor = [NSColor systemOrangeColor];
+    }
+    self.statusLabel.stringValue = text;
+    [self.mixer reloadFromDriver];
 }
 
 - (void)startListening
@@ -1420,6 +1904,9 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
         AudioObjectAddPropertyListenerBlock(dev, &rs, dispatch_get_main_queue(), block);
         AudioObjectPropertyAddress sr = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
         AudioObjectAddPropertyListenerBlock(dev, &sr, dispatch_get_main_queue(), block);
+        // Mixer cambiado desde otra ventana o desde avmctl.
+        AudioObjectPropertyAddress mixr = { AVM_PROPERTY_MIXER, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+        AudioObjectAddPropertyListenerBlock(dev, &mixr, dispatch_get_main_queue(), block);
         self.listening = YES;
     }
 }
@@ -1509,6 +1996,7 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 - (void)namesChanged
 {
     [self.matrixView setNeedsDisplay:YES];
+    [self.mixer namesChanged];
     self.infoLabel.stringValue = @" ";
 }
 
@@ -1549,6 +2037,25 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     (void)sender;
     if (!self.help) self.help = [[AVMHelpController alloc] init];
     [self.help show];
+}
+
+- (void)showMixer:(id)sender
+{
+    (void)sender;
+    if (!self.mixer) {
+        // El estado de la ventana principal se actualiza con la notificación
+        // del driver ('mixr'), igual que si el cambio viene de avmctl.
+        self.mixer = [[AVMMixerController alloc] init];
+    }
+    [self.mixer show];
+}
+
+// Ayuda → sección del mixer (botón «Ayuda del mixer»).
+- (void)showMixerManual:(id)sender
+{
+    [self showHelp:sender];
+    for (int i = 0; i < avm_manual_count; i++)
+        if (!strcmp(avm_manual_sections[i].id, "mixer")) [self.help showSection:i];
 }
 
 - (void)expandAll:(id)sender   { (void)sender; [self.matrixView expandAll:YES]; }

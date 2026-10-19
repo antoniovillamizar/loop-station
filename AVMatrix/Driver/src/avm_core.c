@@ -340,6 +340,146 @@ float avm_peak_to_dbfs(float peak)
     return 20.0f * log10f(peak);
 }
 
+// ---------------------------------------------------------------------------
+// Mixer
+
+void avm_mixer_default(avm_mixer* mx)
+{
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) { mx->src_gain[i] = 1.0f; mx->src_mute[i] = 0; }
+    for (int i = 0; i < AVM_NUM_DESTS; i++)   { mx->dst_gain[i] = 1.0f; mx->dst_mute[i] = 0; }
+}
+
+static bool avm_gain_ok(float g) { return isfinite(g) && g >= 0.0f && g <= 1.0f; }
+
+bool avm_mixer_is_valid(const avm_mixer* mx)
+{
+    for (int i = 0; i < AVM_NUM_SOURCES; i++)
+        if (!avm_gain_ok(mx->src_gain[i]) || mx->src_mute[i] > 1) return false;
+    for (int i = 0; i < AVM_NUM_DESTS; i++)
+        if (!avm_gain_ok(mx->dst_gain[i]) || mx->dst_mute[i] > 1) return false;
+    return true;
+}
+
+bool avm_mixer_is_unity(const avm_mixer* mx)
+{
+    for (int i = 0; i < AVM_NUM_SOURCES; i++)
+        if (mx->src_gain[i] != 1.0f || mx->src_mute[i]) return false;
+    for (int i = 0; i < AVM_NUM_DESTS; i++)
+        if (mx->dst_gain[i] != 1.0f || mx->dst_mute[i]) return false;
+    return true;
+}
+
+float avm_mixer_src_effective(const avm_mixer* mx, int src)
+{
+    if (src < 0 || src >= AVM_NUM_SOURCES) return 0.0f;
+    return mx->src_mute[src] ? 0.0f : mx->src_gain[src];
+}
+
+float avm_mixer_dst_effective(const avm_mixer* mx, int dst)
+{
+    if (dst < 0 || dst >= AVM_NUM_DESTS) return 0.0f;
+    return mx->dst_mute[dst] ? 0.0f : mx->dst_gain[dst];
+}
+
+float avm_db_to_gain(float db)
+{
+    if (isnan(db)) return 0.0f;
+    if (db >= 0.0f) return 1.0f;            // sin amplificación; 0 dB = 1 exacto
+    if (isinf(db)) return 0.0f;             // -INFINITY = silencio
+    float g = powf(10.0f, db / 20.0f);
+    return g > 1.0f ? 1.0f : g;
+}
+
+float avm_gain_to_db(float gain)
+{
+    if (!(gain > 0.0f)) return -INFINITY;
+    if (gain >= 1.0f) return 0.0f;
+    return 20.0f * log10f(gain);
+}
+
+void avm_mixer_pack(const avm_mixer* mx, uint8_t out[AVM_MIXER_BLOB_SIZE])
+{
+    memset(out, 0, AVM_MIXER_BLOB_SIZE);
+    memcpy(out, "AVX1", 4);
+    avm_put_u32(out + 4, AVM_NUM_SOURCES);
+    avm_put_u32(out + 8, AVM_NUM_DESTS);
+    uint8_t* p = out + 16;
+    for (int i = 0; i < AVM_NUM_SOURCES; i++, p += 8) { memcpy(p, &mx->src_gain[i], 4); p[4] = mx->src_mute[i]; }
+    for (int i = 0; i < AVM_NUM_DESTS; i++, p += 8)   { memcpy(p, &mx->dst_gain[i], 4); p[4] = mx->dst_mute[i]; }
+}
+
+bool avm_mixer_unpack(const uint8_t* blob, size_t len, avm_mixer* mx)
+{
+    if (blob == NULL || len != AVM_MIXER_BLOB_SIZE || memcmp(blob, "AVX1", 4) != 0
+        || avm_get_u32(blob + 4) != AVM_NUM_SOURCES || avm_get_u32(blob + 8) != AVM_NUM_DESTS
+        || avm_get_u32(blob + 12) != 0)
+        return false;
+    avm_mixer t;
+    const uint8_t* p = blob + 16;
+    for (int i = 0; i < AVM_NUM_SOURCES; i++, p += 8) {
+        memcpy(&t.src_gain[i], p, 4); t.src_mute[i] = p[4];
+        if (p[5] || p[6] || p[7]) return false;
+    }
+    for (int i = 0; i < AVM_NUM_DESTS; i++, p += 8) {
+        memcpy(&t.dst_gain[i], p, 4); t.dst_mute[i] = p[4];
+        if (p[5] || p[6] || p[7]) return false;
+    }
+    if (!avm_mixer_is_valid(&t)) return false;
+    *mx = t;
+    return true;
+}
+
+static void avm_gain_init(avm_gain* g, float v)
+{
+    atomic_init(&g->target, v);
+    g->cur = g->ramp_to = v;
+    g->step = 0.0f;
+    g->remaining = 0;
+}
+
+// Fin de las rampas (sin IO activo): el canal queda en su objetivo.
+static void avm_gain_settle(avm_gain* g)
+{
+    float t = atomic_load_explicit(&g->target, memory_order_relaxed);
+    g->cur = g->ramp_to = t;
+    g->step = 0.0f;
+    g->remaining = 0;
+}
+
+// Al principio de cada bloque (hilo de IO dueño del canal): si el objetivo
+// cambió, empieza una rampa desde el nivel actual. Una sola carga atómica.
+static inline void avm_gain_begin_block(avm_gain* g)
+{
+    float t = atomic_load_explicit(&g->target, memory_order_relaxed);
+    if (t != g->ramp_to) {
+        g->ramp_to = t;
+        g->step = (t - g->cur) / (float)AVM_GAIN_RAMP_FRAMES;
+        g->remaining = AVM_GAIN_RAMP_FRAMES;
+    }
+}
+
+// Ganancia de la muestra siguiente (avanza la rampa una muestra).
+static inline float avm_gain_next(avm_gain* g)
+{
+    if (g->remaining) {
+        g->cur += g->step;
+        // El redondeo acumulado nunca debe pasar del objetivo (ni amplificar).
+        if ((g->step > 0.0f && g->cur > g->ramp_to) || (g->step < 0.0f && g->cur < g->ramp_to))
+            g->cur = g->ramp_to;
+        if (--g->remaining == 0) g->cur = g->ramp_to;   // termina exactamente en el objetivo
+    }
+    return g->cur;
+}
+
+// Aplica una ganancia. A 1 la muestra no se toca (idéntica bit a bit, incluso
+// -0 y NaN, como antes del mixer); a 0 se entrega silencio exacto.
+static inline float avm_gain_apply(float v, float gain)
+{
+    if (gain == 1.0f) return v;
+    if (gain == 0.0f) return 0.0f;
+    return v * gain;
+}
+
 static void avm_ring_zero_all(avm_engine* e)
 {
     for (int s = 0; s < AVM_NUM_SOURCES; s++)
@@ -398,6 +538,9 @@ void avm_engine_init(avm_engine* e)
     for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_meter_init(&e->src_meters[i]);
     for (int i = 0; i < AVM_NUM_DESTS; i++) avm_meter_init(&e->dst_meters[i]);
     atomic_init(&e->meter_session, 0);
+    avm_mixer_default(&e->mixer);
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_gain_init(&e->src_gain[i], 1.0f);
+    for (int i = 0; i < AVM_NUM_DESTS; i++) avm_gain_init(&e->dst_gain[i], 1.0f);
 }
 
 void avm_engine_reset(avm_engine* e)
@@ -416,6 +559,25 @@ void avm_engine_reset(avm_engine* e)
     for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_meter_clear(&e->src_meters[i]);
     for (int i = 0; i < AVM_NUM_DESTS; i++) avm_meter_clear(&e->dst_meters[i]);
     atomic_store_explicit(&e->meter_session, sess + 2, memory_order_release);
+
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_gain_settle(&e->src_gain[i]);
+    for (int i = 0; i < AVM_NUM_DESTS; i++) avm_gain_settle(&e->dst_gain[i]);
+}
+
+bool avm_engine_set_mixer(avm_engine* e, const avm_mixer* mx)
+{
+    if (mx == NULL || !avm_mixer_is_valid(mx)) return false;
+    e->mixer = *mx;
+    for (int i = 0; i < AVM_NUM_SOURCES; i++)
+        atomic_store_explicit(&e->src_gain[i].target, avm_mixer_src_effective(mx, i), memory_order_relaxed);
+    for (int i = 0; i < AVM_NUM_DESTS; i++)
+        atomic_store_explicit(&e->dst_gain[i].target, avm_mixer_dst_effective(mx, i), memory_order_relaxed);
+    return true;
+}
+
+void avm_engine_get_mixer(const avm_engine* e, avm_mixer* out)
+{
+    *out = e->mixer;
 }
 
 void avm_engine_set_matrix(avm_engine* e, const avm_matrix* m)
@@ -484,13 +646,20 @@ void avm_engine_write_metered(avm_engine* e, avm_src_group g, int64_t sample_tim
     const uint8_t* in = (const uint8_t*)interleaved;
     const uint32_t frame_bytes = bps * channels;
     float vmax[AVM_CHANNELS_PER_PORT] = { 0 }, vmin[AVM_CHANNELS_PER_PORT] = { 0 };
+    // Volumen de entrada del mixer (antes de la matriz). Este hilo es el único
+    // escritor del grupo: es el dueño de la rampa de sus canales.
+    avm_gain* gains = &e->src_gain[base];
+    for (int c = 0; c < nch; c++) avm_gain_begin_block(&gains[c]);
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
+        float gf[AVM_CHANNELS_PER_PORT];
+        for (int c = 0; c < nch; c++) gf[c] = avm_gain_next(&gains[c]);
         if (t < 0) continue;
         int64_t idx = t & AVM_RING_MASK;
         const uint8_t* fp = in + (size_t)f * frame_bytes;
         for (int c = 0; c < nch; c++) {
             float v = ((uint32_t)c < channels) ? avm_sample_to_float(fp + (size_t)c * bps, fmt) : 0.0f;
+            v = avm_gain_apply(v, gf[c]);
             atomic_store_explicit(&e->ring[base + c][idx], v, memory_order_relaxed);
             // Medición: solo se observa el valor ya convertido (extremos con signo).
             if (v > vmax[c]) vmax[c] = v;
@@ -559,6 +728,10 @@ bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time
     uint8_t* out = (uint8_t*)interleaved;
     const uint32_t frame_bytes = bps * channels;
     float vmax[AVM_CHANNELS_PER_PORT] = { 0 }, vmin[AVM_CHANNELS_PER_PORT] = { 0 };
+    // Volumen de salida del mixer (después del enrutamiento y la suma). Este
+    // hilo es el único lector del grupo: es el dueño de la rampa de sus canales.
+    avm_gain* gains = &e->dst_gain[dbase];
+    for (int d = 0; d < dnch; d++) avm_gain_begin_block(&gains[d]);
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
         int64_t idx = t & AVM_RING_MASK;
@@ -572,6 +745,7 @@ bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time
                     if (t >= lo[sg] && t < hi[sg])
                         acc += atomic_load_explicit(&e->ring[s][idx], memory_order_relaxed);
                 }
+                acc = avm_gain_apply(acc, avm_gain_next(&gains[c]));
             }
             avm_float_to_sample(acc, fp + (size_t)c * bps, fmt);
             if ((int)c < dnch) {

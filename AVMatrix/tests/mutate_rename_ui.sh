@@ -18,7 +18,7 @@ mutate() {   # mutate <nombre> <motivo esperado> <expresión perl>
     perl -0pe "$expr" "$APP" > "$m"
     if cmp -s "$APP" "$m"; then echo "FALLO: $name no cambió nada (patrón obsoleto)"; FAIL=$((FAIL+1)); return; fi
     if ! clang -fobjc-arc -O0 -Wno-four-char-constants -DAVM_APP_FILE="\"../$m\"" -o "$OUT/t_$name" \
-            tests/test_rename_ui.m App/avm_manual.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
+            tests/test_rename_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
             -framework Cocoa -framework CoreAudio -framework CoreFoundation 2> "$OUT/$name.cc"; then
         echo "FALLO: $name no compila"; cat "$OUT/$name.cc"; FAIL=$((FAIL+1)); return
     fi

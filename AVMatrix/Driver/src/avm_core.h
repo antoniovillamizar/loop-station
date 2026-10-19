@@ -7,7 +7,11 @@
 //   Fuentes (18):   salidas de Smaart 1-8, salidas de LISTENTO 1-8, Música L/R.
 //   Destinos (16):  entradas de Smaart 1-8, entradas de LISTENTO 1-8.
 //   Cada cruce de la matriz es 0 (abierto) o 1 (conectado a ganancia unidad).
-//   No hay ganancia variable, ecualización, efectos ni delay ajustable.
+//   Mixer: cada fuente y cada destino tienen un volumen que SOLO atenúa
+//   (de 0 dB a silencio, sin amplificación) y un MUTE. El de la fuente actúa
+//   antes de la matriz; el del destino, después del enrutamiento y la suma.
+//   A 0 dB sin mute la señal pasa sin tocar (idéntica bit a bit).
+//   No hay ecualización, efectos ni delay ajustable.
 
 #ifndef AVM_CORE_H
 #define AVM_CORE_H
@@ -97,10 +101,11 @@ typedef struct {
 // --- Medidores de nivel ------------------------------------------------------
 // Solo observan: leen los mismos valores float que el motor ya calcula y nunca
 // modifican, retrasan ni copian las muestras transportadas.
-//   * Fuente: valor de cada muestra que la aplicación envía (antes de la matriz;
-//     incluye la mezcla que hace macOS si varias apps usan la misma salida).
-//   * Destino: valor sumado por la matriz que se entrega a la aplicación
-//     (después del enrutamiento y de la suma; antes de recortar a entero).
+//   * Fuente: valor de cada muestra que la aplicación envía, después de su
+//     volumen y mute del mixer y antes de la matriz (incluye la mezcla que hace
+//     macOS si varias apps usan la misma salida).
+//   * Destino: valor que se entrega a la aplicación: después del enrutamiento,
+//     de la suma y del volumen y mute de ese destino; antes de recortar a entero.
 // Cada medidor tiene UN escritor (el hilo de IO de su dispositivo) y se
 // actualiza sin esperas: solo cargas y almacenamientos atómicos.
 // El pico se agrupa en ventanas de AVM_METER_EPOCH_NS; la lectura devuelve el
@@ -124,6 +129,34 @@ typedef struct {
     bool    active;     // llegaron bloques en los últimos AVM_METER_ACTIVE_NS
     bool    clip;       // saturación en los últimos AVM_METER_CLIP_HOLD_NS
 } avm_meter_reading;
+
+// --- Mixer ---------------------------------------------------------------------
+// Ajustes: ganancia lineal de 0 a 1 (1 = 0 dB; 0 = silencio) y mute por canal.
+// La ganancia se conserva al activar el mute: al quitarlo vuelve al mismo nivel.
+typedef struct {
+    float   src_gain[AVM_NUM_SOURCES];
+    float   dst_gain[AVM_NUM_DESTS];
+    uint8_t src_mute[AVM_NUM_SOURCES];   // 1 = silenciado
+    uint8_t dst_mute[AVM_NUM_DESTS];
+} avm_mixer;
+
+// Cambios sin chasquidos: cada canal pasa del nivel anterior al nuevo con una
+// rampa lineal de AVM_GAIN_RAMP_FRAMES muestras (≈ 10,7 ms a 48 kHz). La rampa
+// avanza muestra a muestra dentro del bloque que ya se está procesando: no
+// añade retardo de transporte.
+#define AVM_GAIN_RAMP_FRAMES 512u
+
+// Estado de la ganancia de un canal. `target` lo escribe el hilo de control
+// (atómico, sin bloqueos); el resto es la rampa y solo lo toca el hilo de IO
+// dueño del canal (el escritor de su grupo de fuentes o el lector de su grupo
+// de destinos), igual que reader_cache.
+typedef struct {
+    _Atomic float target;     // ganancia efectiva: mute ? 0 : ganancia
+    float         cur;        // ganancia aplicada a la última muestra
+    float         ramp_to;    // objetivo de la rampa en curso
+    float         step;
+    uint32_t      remaining;  // muestras que faltan de la rampa
+} avm_gain;
 
 typedef struct {
     // Las muestras son atómicas con orden relajado: en arm64 y x86_64 compilan
@@ -150,6 +183,12 @@ typedef struct {
     // los limpia y par al terminar. Un lector que lo ve impar o cambiado durante
     // su lectura informa «inactivo»: nunca mezcla valores de dos sesiones.
     _Atomic uint32_t    meter_session;
+
+    avm_gain            src_gain[AVM_NUM_SOURCES];
+    avm_gain            dst_gain[AVM_NUM_DESTS];
+    // Copia de los ajustes del mixer (con las ganancias de los canales en mute).
+    // Solo la usa el hilo de control, serializado por el llamador.
+    avm_mixer           mixer;
 } avm_engine;
 
 // --- Descripción de grupos -------------------------------------------------
@@ -173,9 +212,34 @@ void avm_matrix_direct(avm_matrix* m);
 // Devuelve true si la matriz no contiene cruces prohibidos ni valores distintos de 0/1.
 bool avm_matrix_is_valid(const avm_matrix* m);
 
+// --- Mixer -------------------------------------------------------------------
+// Todos los canales a 0 dB y sin mute (estado de una instalación nueva).
+void  avm_mixer_default(avm_mixer* mx);
+// true si todas las ganancias son finitas y están en [0, 1] y los mutes son 0/1.
+// Una ganancia mayor que 1 (amplificación) se rechaza.
+bool  avm_mixer_is_valid(const avm_mixer* mx);
+// true si todos los canales están a 0 dB (ganancia 1) y sin mute.
+bool  avm_mixer_is_unity(const avm_mixer* mx);
+// Ganancia efectiva de una fuente o un destino (0 si está en mute).
+float avm_mixer_src_effective(const avm_mixer* mx, int src);
+float avm_mixer_dst_effective(const avm_mixer* mx, int dst);
+// dB <-> ganancia lineal. avm_db_to_gain: 0 dB -> 1 exacto; -INFINITY -> 0;
+// valores positivos se limitan a 1 (sin amplificación). avm_gain_to_db(0) = -INFINITY.
+float avm_db_to_gain(float db);
+float avm_gain_to_db(float gain);
+
+// Serialización para la propiedad 'mixr' del driver y su almacenamiento.
+// Formato: cabecera 16 bytes ('AVX1', n fuentes, n destinos, 0) y 8 bytes por
+// canal (float ganancia, uint8 mute, 3 bytes a 0), fuentes y luego destinos.
+#define AVM_MIXER_BLOB_SIZE (16u + 8u * (AVM_NUM_SOURCES + AVM_NUM_DESTS))
+void avm_mixer_pack(const avm_mixer* mx, uint8_t out[AVM_MIXER_BLOB_SIZE]);
+// Devuelve false (y no modifica *mx) si el tamaño, la cabecera o algún valor no es válido.
+bool avm_mixer_unpack(const uint8_t* blob, size_t len, avm_mixer* mx);
+
 // --- Motor -----------------------------------------------------------------
 void avm_engine_init(avm_engine* e);
 // Vacía los buffers, la historia de escritura y los medidores (nueva sesión).
+// Las rampas del mixer terminan: cada canal queda en su ganancia objetivo.
 // No usar mientras haya IO activo; los lectores de medidores pueden seguir
 // leyendo durante el reinicio: verán «inactivo» y nunca picos de la sesión anterior.
 void avm_engine_reset(avm_engine* e);
@@ -185,6 +249,14 @@ void avm_engine_set_matrix(avm_engine* e, const avm_matrix* m);
 // Lectura acotada y sin espera. Devuelve false (y no modifica *out) si tras
 // AVM_MATRIX_READ_ATTEMPTS intentos no obtuvo una copia coherente.
 bool avm_engine_try_get_matrix(avm_engine* e, avm_matrix* out);
+
+// Aplica los ajustes del mixer (deben ser válidos; si no, no hace nada y
+// devuelve false). Solo publica la ganancia objetivo de cada canal con un
+// almacenamiento atómico: nunca bloquea ni espera al hilo de audio. Cada
+// canal llega al nuevo nivel con una rampa de AVM_GAIN_RAMP_FRAMES muestras.
+// Los llamadores deben estar serializados (hilo de control).
+bool avm_engine_set_mixer(avm_engine* e, const avm_mixer* mx);
+void avm_engine_get_mixer(const avm_engine* e, avm_mixer* out);
 
 // Variantes con medición: now_ns es la hora monotónica en nanosegundos (> 0).
 // Hacen exactamente lo mismo que avm_engine_write/avm_engine_read y además

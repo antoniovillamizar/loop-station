@@ -277,6 +277,45 @@ typedef struct {
 
 static test_ctx g_t;
 
+// Fase del mixer (modo 3): mismos valores que el modo 0 con esta matriz y estos ajustes.
+//   listento.in.1 <- smaart.out.1                 0 dB (aislamiento)
+//   listento.in.2 <- smaart.out.2                 fuente a 0,5 (−6 dB)
+//   listento.in.3 <- smaart.out.3                 destino en MUTE
+//   listento.in.4 <- smaart.out.4 + smaart.out.5  destino a 0,5 (después de la suma)
+//   listento.in.5 <- smaart.out.6                 fuente en MUTE
+//   listento.in.6 <- smaart.out.7                 fuente 0,5 y destino 0,5
+//   smaart.in.1   <- listento.out.1               0 dB
+// Los valores k/64 · 0,5 y · 0,25 son exactos en los cuatro formatos.
+static void mixer_phase(avm_matrix* m, avm_mixer* mx)
+{
+    avm_matrix_clear(m);
+    for (int i = 0; i < 3; i++) m->cell[AVM_DST_LINK_BASE + i][AVM_SRC_SMAART_BASE + i] = 1;
+    m->cell[AVM_DST_LINK_BASE + 3][AVM_SRC_SMAART_BASE + 3] = 1;
+    m->cell[AVM_DST_LINK_BASE + 3][AVM_SRC_SMAART_BASE + 4] = 1;
+    m->cell[AVM_DST_LINK_BASE + 4][AVM_SRC_SMAART_BASE + 5] = 1;
+    m->cell[AVM_DST_LINK_BASE + 5][AVM_SRC_SMAART_BASE + 6] = 1;
+    m->cell[AVM_DST_SMAART_BASE + 0][AVM_SRC_LINK_BASE + 0] = 1;
+    avm_mixer_default(mx);
+    mx->src_gain[AVM_SRC_SMAART_BASE + 1] = 0.5f;
+    mx->dst_mute[AVM_DST_LINK_BASE + 2] = 1;
+    mx->dst_gain[AVM_DST_LINK_BASE + 3] = 0.5f;
+    mx->src_mute[AVM_SRC_SMAART_BASE + 5] = 1;
+    mx->src_gain[AVM_SRC_SMAART_BASE + 6] = 0.5f;
+    mx->dst_gain[AVM_DST_LINK_BASE + 5] = 0.5f;
+}
+
+static float expected_mixer(int dev, int c)
+{
+    if (dev != T_LINK) return c == 0 ? val_link(0) : 0.0f;
+    switch (c) {
+        case 0: return val_smaart(0);
+        case 1: return val_smaart(1) * 0.5f;
+        case 3: return (val_smaart(3) + val_smaart(4)) * 0.5f;
+        case 5: return val_smaart(6) * 0.5f * 0.5f;
+        default: return 0.0f;   // 3: destino en MUTE; 5: fuente en MUTE; 7-8: sin ruta
+    }
+}
+
 static float expected_in(int dev, int c)
 {
     if (dev == T_LINK) return val_smaart(c);           // smaart.out.N -> listento.in.N
@@ -297,11 +336,11 @@ static void classify_input(int dev, const AudioBufferList* in, const AudioTimeSt
     if (g_t.first_in[dev] < 0) g_t.first_in[dev] = t->mSampleTime;
     int di = dev == T_LINK ? 1 : 0;
 
-    if (g_t.mode == 0) {
+    if (g_t.mode == 0 || g_t.mode == 3) {
         if (t->mSampleTime < g_t.first_in[dev] + 1.5 * g_t.rate) return;  // calentamiento
         for (UInt32 f = 0; f < frames; f++)
             for (UInt32 c = 0; c < nch && c < 8; c++) {
-                float v = p[f * nch + c], e = expected_in(dev, (int)c);
+                float v = p[f * nch + c], e = g_t.mode == 3 ? expected_mixer(dev, (int)c) : expected_in(dev, (int)c);
                 if (v == e) atomic_fetch_add(&g_t.correct[di][c], 1);
                 else if (v == 0.0f) atomic_fetch_add(&g_t.silent[di][c], 1);
                 else atomic_fetch_add(&g_t.wrong[di][c], 1);
@@ -326,7 +365,7 @@ static void fill_output(int dev, AudioBufferList* out, const AudioTimeStamp* t)
     UInt32 frames = out->mBuffers[0].mDataByteSize / (sizeof(float) * (nch ? nch : 1));
     memset(p, 0, out->mBuffers[0].mDataByteSize);
 
-    if (g_t.mode == 0) {
+    if (g_t.mode == 0 || g_t.mode == 3) {
         for (UInt32 f = 0; f < frames; f++)
             for (UInt32 c = 0; c < nch; c++)
                 p[f * nch + c] = dev == T_SMAART ? val_smaart((int)c)
@@ -471,12 +510,31 @@ static void meters_after_stop(int verbose)
     else if (verbose) printf("  OK     al detener el audio, los 34 medidores pasan a inactivo\n");
 }
 
+// Medidores de la fase del mixer: muestran el nivel resultante de los controles.
+static void meters_during_mixer(void)
+{
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    if (avm_get_meters(s, d) != noErr) { printf("  FALLO  no se pudieron leer los medidores\n"); g_meter_pass = 0; return; }
+    meter_expect("Smaart Salida 2 tras su volumen (−6 dB)", &s[AVM_SRC_SMAART_BASE + 1], val_smaart(1) * 0.5f, 0);
+    meter_expect("Smaart Salida 6 en MUTE", &s[AVM_SRC_SMAART_BASE + 5], 0.0f, 0);
+    meter_expect("LISTENTO Envío 2 (fuente −6 dB)", &d[AVM_DST_LINK_BASE + 1], val_smaart(1) * 0.5f, 0);
+    meter_expect("LISTENTO Envío 3 en MUTE", &d[AVM_DST_LINK_BASE + 2], 0.0f, 0);
+    meter_expect("LISTENTO Envío 4 = suma · 0,5", &d[AVM_DST_LINK_BASE + 3], (val_smaart(3) + val_smaart(4)) * 0.5f, 0);
+    meter_expect("LISTENTO Envío 6 = 0,5 · 0,5", &d[AVM_DST_LINK_BASE + 5], val_smaart(6) * 0.25f, 0);
+}
+
 // Devuelve 1 si todo pasó.
 static int run_test_once(int verbose)
 {
     Float64 rate = 48000;
     avm_get_sample_rate(&rate);
     int pass = 1;
+
+    // El mixer a 0 dB sin mute durante las fases 1-3 (comportamiento anterior al mixer).
+    avm_mixer unity;
+    avm_mixer_default(&unity);
+    OSStatus merr = avm_set_mixer(&unity);
+    if (merr) { print_err("poner el mixer a 0 dB", merr); return 0; }
 
     // 1) Regla anti-lazo: la matriz con retorno->envío de LISTENTO debe rechazarse.
     avm_matrix bad;
@@ -525,6 +583,35 @@ static int run_test_once(int verbose)
     meters_after_stop(verbose);
     if (!g_meter_pass) pass = 0;
 
+    // 2c) Mixer: volumen de fuentes (antes de la matriz) y destinos (después de
+    // la suma), MUTE y aislamiento, muestra por muestra; y el mixer rechaza amplificar.
+    avm_mixer mx, loud;
+    mixer_phase(&m, &mx);
+    avm_mixer_default(&loud);
+    loud.src_gain[0] = 1.5f;
+    if (avm_set_mixer(&loud) == noErr) { printf("  FALLO  el mixer aceptó amplificar (+3,5 dB)\n"); pass = 0; }
+    else if (verbose) printf("  OK     el mixer rechaza amplificar\n");
+    if ((err = avm_set_matrix(&m))) { print_err("escribir matriz de prueba", err); return 0; }
+    if ((err = avm_set_mixer(&mx))) { print_err("escribir mixer de prueba", err); return 0; }
+    reset_ctx(3, rate);
+    g_meter_pass = 1;
+    if (!run_devices(3.0, meters_during_mixer)) { avm_set_mixer(&unity); return 0; }
+    const char* mn[2][8] = {
+        { "Smaart entrada 1 (0 dB)", "Smaart entrada 2 (sin ruta)", "Smaart entrada 3", "Smaart entrada 4", "Smaart entrada 5", "Smaart entrada 6", "Smaart entrada 7", "Smaart entrada 8" },
+        { "Envío 1 (0 dB)", "Envío 2 (fuente −6 dB)", "Envío 3 (destino MUTE)", "Envío 4 (suma · −6 dB)", "Envío 5 (fuente MUTE)", "Envío 6 (−6 −6 dB)", "Envío 7 (sin ruta)", "Envío 8 (sin ruta)" } };
+    for (int di = 0; di < 2; di++)
+        for (int c = 0; c < 8; c++) {
+            long ok = atomic_load(&g_t.correct[di][c]), w = atomic_load(&g_t.wrong[di][c]);
+            long z = atomic_load(&g_t.silent[di][c]);
+            int good = ok > 0 && z == 0 && w == 0;   // silencio esperado también cuenta como «correcta»
+            if (!good) pass = 0;
+            if (verbose || !good)
+                printf("  %-6s mixer %s: %ld correctas, %ld en silencio, %ld distintas\n", good ? "OK" : "FALLO", mn[di][c], ok, z, w);
+        }
+    meters_after_stop(verbose);
+    if (!g_meter_pass) pass = 0;
+    if ((merr = avm_set_mixer(&unity))) { print_err("poner el mixer a 0 dB", merr); pass = 0; }
+
     // 3) Retardo de transporte con un impulso (informativo; no es un objetivo de latencia).
     avm_matrix_clear(&m);
     m.cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
@@ -549,6 +636,8 @@ static int cmd_test(int all)
     avm_matrix saved;
     OSStatus err = avm_get_matrix(&saved);
     if (err) { print_err("leer matriz", err); return 1; }
+    avm_mixer saved_mixer;
+    if ((err = avm_get_mixer(&saved_mixer))) { print_err("leer mixer", err); return 1; }
     Float64 saved_rate = 48000;
     avm_get_sample_rate(&saved_rate);
     AudioStreamBasicDescription f_s_in, f_s_out, f_l_in, f_l_out, f_m_out;
@@ -591,11 +680,64 @@ static int cmd_test(int all)
     if (fs[2] >= 0) avm_set_physical_format(AVM_DEV_LISTENTO, true, (avm_format)fs[2]);
     if (fs[3] >= 0) avm_set_physical_format(AVM_DEV_LISTENTO, false, (avm_format)fs[3]);
     if (fs[4] >= 0) avm_set_physical_format(AVM_DEV_MUSIC, false, (avm_format)fs[4]);
+    OSStatus merr = avm_set_mixer(&saved_mixer);
+    if (merr) print_err("restaurar mixer", merr);
     if ((err = avm_set_matrix(&saved))) print_err("restaurar matriz", err);
-    else printf("Matriz, frecuencia y formatos restaurados.\n");
+    else if (!merr) printf("Matriz, mixer, frecuencia y formatos restaurados.\n");
 
     printf("RESULTADO: %s\n", total_pass ? "CORRECTO" : "HAY FALLOS");
     return total_pass ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// Mixer
+
+static void print_gain(float g, int mute)
+{
+    if (g >= 1.0f) printf("   0.0 dB");
+    else if (g <= 0.0f) printf("    −∞ dB");
+    else printf("%+6.1f dB", (double)avm_gain_to_db(g));
+    printf("%s\n", mute ? "  MUTE" : "");
+}
+
+static int cmd_mixer(int argc, char** argv)
+{
+    avm_mixer mx;
+    OSStatus err = avm_get_mixer(&mx);
+    if (err) { print_err("leer mixer", err); return 1; }
+    if (argc == 2) {
+        char tok[32];
+        printf("Entradas a la matriz (antes de la matriz):\n");
+        for (int i = 0; i < AVM_NUM_SOURCES; i++) { avm_source_token(i, tok, sizeof(tok)); printf("  %-15s ", tok); print_gain(mx.src_gain[i], mx.src_mute[i]); }
+        printf("Salidas de la matriz (después de la suma):\n");
+        for (int i = 0; i < AVM_NUM_DESTS; i++) { avm_dest_token(i, tok, sizeof(tok)); printf("  %-15s ", tok); print_gain(mx.dst_gain[i], mx.dst_mute[i]); }
+        if (avm_mixer_is_unity(&mx)) printf("Todos los canales a 0 dB y sin mute.\n");
+        return 0;
+    }
+    const char* sub = argv[2];
+    if (!strcmp(sub, "reset") && argc == 3) {
+        avm_mixer_default(&mx);
+    } else if ((!strcmp(sub, "gain") || !strcmp(sub, "mute")) && argc == 5) {
+        int s = avm_parse_source(argv[3]), d = s < 0 ? avm_parse_dest(argv[3]) : -1;
+        if (s < 0 && d < 0) { printf("Canal desconocido: %s\n", argv[3]); return 2; }
+        if (!strcmp(sub, "gain")) {
+            char* end = NULL;
+            float db = (!strcmp(argv[4], "-inf") || !strcmp(argv[4], "silencio")) ? -INFINITY : strtof(argv[4], &end);
+            if (end && (*end || end == argv[4])) { printf("Valor en dB no válido: %s\n", argv[4]); return 2; }
+            if (db > 0.0f) { printf("El mixer solo atenúa: use 0 dB o menos.\n"); return 2; }
+            if (s >= 0) mx.src_gain[s] = avm_db_to_gain(db); else mx.dst_gain[d] = avm_db_to_gain(db);
+        } else {
+            int on = !strcmp(argv[4], "on");
+            if (!on && strcmp(argv[4], "off")) { printf("Use on u off.\n"); return 2; }
+            if (s >= 0) mx.src_mute[s] = (uint8_t)on; else mx.dst_mute[d] = (uint8_t)on;
+        }
+    } else {
+        printf("Uso: avmctl mixer [reset | gain <canal> <dB|-inf> | mute <canal> on|off]\n");
+        return 2;
+    }
+    if ((err = avm_set_mixer(&mx))) { print_err("escribir mixer", err); return 1; }
+    printf("Mixer actualizado.\n");
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +753,7 @@ static void usage(void)
            "  avmctl rate 44100|48000|96000\n"
            "  avmctl recover\n"
            "  avmctl meters [--watch]\n"
+           "  avmctl mixer [reset | gain <canal> <dB|-inf> | mute <canal> on|off]\n"
            "  avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>\n"
            "  avmctl test\n"
            "  avmctl test-all\n\n"
@@ -636,6 +779,7 @@ int main(int argc, char** argv)
     if (!strcmp(c, "rate") && argc == 3) return cmd_rate(argv[2]);
     if (!strcmp(c, "recover")) return cmd_recover();
     if (!strcmp(c, "meters")) return cmd_meters(argc == 3 && !strcmp(argv[2], "--watch"));
+    if (!strcmp(c, "mixer")) return cmd_mixer(argc, argv);
     if (!strcmp(c, "format") && argc == 5) return cmd_format(argv[2], argv[3], argv[4]);
     if (!strcmp(c, "test")) return cmd_test(0);
     if (!strcmp(c, "test-all")) return cmd_test(1);

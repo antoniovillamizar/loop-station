@@ -1,8 +1,134 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 11; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 12; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 11 — pantalla principal simplificada y manual en la app (sobre `cf5f158`)
+## 0. Revisión 12 — mixer: volumen (solo atenuación) y MUTE por canal (sobre `fddbc62`)
+
+Encargo: una ventana «Mixer» con volumen y MUTE para las 18 entradas a la matriz y las 16 salidas. Antes de modificar se hizo una copia de seguridad del proyecto en `fddbc62`. **No se instaló nada ni se reinició coreaudiod.**
+
+**Esta revisión cambia el motor y el driver:**
+- `avm_core.[ch]`;
+- `AVMatrixDriver.c`, con la propiedad nueva `'mixr'`;
+- `avm_client.[ch]` y `avmctl`.
+
+Hay que instalarla con `install.sh` completo, **no con `--app-only`**.
+
+**Qué se comprobó y dónde:**
+- **En Linux:**
+  - el motor del mixer (`tests/test_mixer.c`), con ASan, UBSan y TSan;
+  - la escala de los faders (`tests/test_fader.c`);
+  - la **comparación bit a bit con el motor de `fddbc62`** (`tests/compare_engine_unity.sh`);
+  - el manual;
+  - las comprobaciones estáticas;
+  - la compilación cruzada de driver, app, `avmctl` y las tres pruebas nativas;
+  - la maqueta de la ventana.
+- **En un Mac:** nada todavía. No se han ejecutado el driver con `'mixr'`, `avmctl test` con la fase nueva del mixer ni `tests/test_mixer_ui.m`.
+
+### 0.12.1 Motor (`Driver/src/avm_core.[ch]`)
+
+- **Ajustes** (`avm_mixer`): ganancia lineal en [0, 1] y mute 0/1 por canal. `avm_mixer_is_valid` **rechaza cualquier ganancia mayor que 1** (no se puede amplificar), además de NaN, infinito, negativos y mutes distintos de 0/1. Al activar el MUTE la ganancia se conserva.
+- **Dónde actúa:**
+  - **Fuentes:** en `avm_engine_write_metered` (`:662`), antes de guardar la muestra en el buffer, es decir, antes de la matriz;
+  - **Destinos:** en `avm_engine_read_metered` (`:748`), después de la suma y antes de convertir al formato.
+  - Los medidores observan esos mismos valores: muestran **el nivel resultante**.
+- **Sin chasquidos ni bloqueos:**
+  - `avm_engine_set_mixer` (`:567`) solo publica la ganancia objetivo de cada canal con un almacenamiento atómico relajado;
+  - al principio de cada bloque, el hilo de IO dueño del canal lee el objetivo con una carga atómica (`avm_gain_begin_block`, `:451`) y, si cambió, hace una **rampa lineal de 512 muestras** (unos 10,7 ms a 48 kHz) que avanza muestra a muestra;
+  - el dueño es el único escritor de su grupo de fuentes o el único lector de su grupo de destinos, el mismo criterio que `reader_cache`;
+  - la rampa nunca pasa del objetivo y termina exactamente en él;
+  - no hay mutex, esperas ni retardo de transporte: el impulso sale en el mismo instante.
+- **0 dB idéntico:** a ganancia 1 la muestra no se toca; a 0 se entrega +0 exacto (`avm_gain_apply`, `:476`).
+- **Reinicio:** `avm_engine_reset` termina las rampas (sin IO activo).
+- **Serialización:** `avm_mixer_pack` y `avm_mixer_unpack` (cabecera `AVX1`, 8 bytes por canal, el relleno debe ser 0, se valida al desempaquetar).
+
+### 0.12.2 Driver (`Driver/src/AVMatrixDriver.c`)
+
+- Propiedad personalizada **`'mixr'`** (CFData) en el plug-in y en los tres dispositivos, como `'mtrx'`. Se declara en `kCustomProps`, en Has, Size, Get, IsSettable y Set.
+- Al escribirla (`AVM_SetMixerProperty`, `:726`):
+  - se desempaqueta y valida, y se rechaza entera si algo no es válido;
+  - se aplica con `gStateMutex` tomado (solo el hilo de control; el de audio no lo toma);
+  - se guarda en el almacenamiento con la clave `"mixer"` (`:333`) y se notifica a todos los dispositivos.
+- Al cargar el driver (`:371`), si no hay ajustes guardados (**instalación nueva**) queda todo a 0 dB y sin mute. Un ajuste guardado inválido se descarta con un aviso en el registro.
+
+### 0.12.3 Cliente y Terminal
+
+- `avm_get_mixer` y `avm_set_mixer` en `Client/avm_client.[ch]`.
+- `avmctl mixer`, `mixer reset`, `mixer gain <canal> <dB|-inf>` (rechaza dB positivos) y `mixer mute <canal> on|off` (`Client/avmctl.c:703`).
+- **`avmctl test` y `test-all`:**
+  - guardan y restauran el mixer;
+  - ponen 0 dB sin mute en las fases anteriores;
+  - añaden la **fase 2c** (`:586`): comprueba muestra por muestra la fuente a −6 dB, el destino en MUTE, la suma con el destino a −6 dB, la fuente en MUTE, −6 −6 dB y el aislamiento a 0 dB, con valores k/64 exactos en los cuatro formatos;
+  - comprueba los medidores tras el mixer y que el driver rechaza amplificar.
+
+### 0.12.4 App (`App/AVMatrixApp.m`, `App/avm_fader.[ch]`)
+
+- **Botón «Mixer»** en la barra superior (`showMixer:`, `:2042`). La ventana (`AVMMixerController`, `:1328`) es redimensionable y tiene desplazamiento.
+- **Dos secciones:**
+  - **ENTRADAS A LA MATRIZ:** Smaart Salidas 1-8, LISTENTO Retornos 1-8 y Música L/R;
+  - **SALIDAS DE LA MATRIZ:** Smaart Entradas 1-8 y LISTENTO Envíos 1-8.
+- **Cada tira:** número, nombre personalizado (con la descripción completa en la ayuda emergente), medidor vertical con LED de saturación y pico en dBFS, fader vertical con lectura en dB y botón **MUTE**, que se pone rojo cuando está activo.
+- **Fader:** escala cúbica (ganancia = posición³), arriba 0 dB exactos (se ajusta a 0 dB por encima del 99,8 %) y abajo silencio. Doble clic u Opción+clic vuelve a 0 dB. El recorrido termina en 0 dB: no amplifica.
+- **«Silenciar todos»** activa los 34 MUTE sin perder los volúmenes. **«Restaurar 0 dB y quitar mutes…»** pide confirmación, porque el audio puede subir de golpe.
+- **Envíos al driver:** se agrupan cada 30 ms (`scheduleSend`, `:1519`); el MUTE se envía al momento. El temporizador y los medidores corren en `NSRunLoopCommonModes`, así siguen funcionando mientras se arrastra un fader.
+- **Coherencia con otros cambios:** la app escucha `'mixr'`, así que un cambio hecho con `avmctl` se refleja, sin pisar un cambio local pendiente.
+- La línea de estado principal avisa en naranja si hay canales atenuados o en MUTE (`:1875`).
+- **Se conservan:** conexiones, nombres, icono, manual y pantalla compacta.
+
+### 0.12.5 Manual
+
+- Nueva sección **«Mixer: volumen y MUTE de cada canal»**, con un apartado **«Cómo afecta a la medición en Smaart»**:
+  - bajar Salida 1 baja a la vez el envío y la referencia: la curva no cambia, pero empeora la relación señal/ruido;
+  - bajar la referencia (Entrada 8) o la medición (Entrada 1), o Envío 1 o Retorno 1, desplaza la curva de magnitud exactamente esos dB;
+  - un MUTE en la referencia o en la medición deja sin buscador de delay ni coherencia;
+  - la fase y el retardo no cambian.
+- **También se actualizan:** inicio, matriz, referencia en Smaart, medidores (nivel tras el mixer), diagnóstico (canal en MUTE o atenuado) y limitaciones (solo atenúa; rampa de unos 10 ms).
+
+### 0.12.6 Pruebas
+
+| Prueba | Dónde | Qué comprueba |
+| --- | --- | --- |
+| `tests/test_mixer.c` (nueva, 85) | Linux, también con ASan, UBSan y TSan | Instalación nueva a 0 dB sin mute. Rechazo de >1, negativos, NaN, ±inf y mute 2, sin cambiar nada. dB ↔ ganancia. Serialización (ida y vuelta, cabecera, relleno, valores inválidos). **0 dB bit a bit** tras pasar por otros ajustes, en los 4 formatos (−0, subnormales, ±1, >1). **Niveles:** fuente 0,5 → mitad exacta. **Aislamiento:** los demás canales exactos. **Sumas:** volumen de salida después de la suma ((a+b)·0,25) y de entrada antes (a·0,5+b). **Medidores** con el nivel resultante. **MUTE:** silencio +0 exacto, conserva el volumen y quitarlo recupera el nivel; un NaN o inf de una fuente en MUTE no contamina la suma; «silenciar todos» y «restaurar». **Rampas:** ningún salto mayor que 1/512 entre muestras, bajada y subida progresivas, silencio exacto al final, cambio a mitad de rampa sin saltos. **Nunca amplifica** (|salida| ≤ |entrada| con volúmenes aleatorios). **Sin retardo** (el impulso sale en el mismo instante). Saturación tras el volumen. **Concurrencia:** el control cambia el mixer sin parar durante el audio |
+| Mutaciones del motor | Linux | Sin rampa (9 fallos), sin volumen de entrada (15), sin volumen de salida (8), permitir amplificar (6), sin silencio exacto (1), mute de fuente ignorado (6): todas detectadas |
+| `tests/compare_engine_unity.sh` + `tests/engine_dump.c` (nuevas) | Linux | **Mismo resultado que el motor de `fddbc62` sin mixer**, bit a bit: 12,5 MB de audio de los 16 destinos y medidores, con matrices aleatorias, lecturas desplazadas y valores límite en los 4 formatos. Se ejecuta en `make test` |
+| `tests/test_fader.c` (nueva, 17) | Linux | 0 dB exactos arriba, silencio abajo, monótona, nunca por encima de 1, siempre válida para el driver, escala útil (−6 dB al 79 %), ida y vuelta, lecturas «0.0 dB», «-6.0 dB», «−∞» y sin «-0.0» |
+| `tests/test_mixer_ui.m` (nueva, nativa, 38 comprobaciones; modo `offline`, no toca el driver) | Mac (sin ejecutar) | Dos secciones y cinco grupos; 34 tiras completas (número, nombre, medidor, fader a 0 dB con lectura y MUTE); nombre personalizado con tildes; fader a la mitad = 0,125 «-18.1 dB» sin tocar los demás canales; 50 movimientos agrupados en 1-3 envíos; abajo «−∞», arriba 0 dB exactos, sin amplificación; MUTE conserva el volumen, se envía al momento y se resalta; «Silenciar todos» y «Restaurar»; medidores, saturación y «—»; botón «Mixer» en la ventana principal |
+| `tests/test_manual.c` (+18, 328) | Linux | Los temas del mixer y su efecto en Smaart; la referencia remite al mixer; ya no dice que no hay control de nivel |
+| `tests/test_app_strings.sh` (+8, 36) y `tests/test_build_script.sh` (+4, 27) | Linux | Botones Mixer, Silenciar todos, Restaurar y MUTE; fader hasta 0 dB (mutación detectada); temporizadores en modos comunes; confirmación al restaurar; escucha de `'mixr'`. `build.sh` compila y ejecuta `test_mixer`, `test_fader` y `test_mixer_ui`, e incluye `avm_fader.c` en la app |
+
+**Resultados (Linux):**
+
+| Suite | Resultado |
+| --- | --- |
+| Núcleo | 122/122 |
+| Frecuencia | 115/115 |
+| Medidores | 117/117 |
+| Nombres | 51/51 |
+| Manual | 328/328 |
+| **Mixer** | **85/85** |
+| **Faders** | **17/17** |
+| **Motor a 0 dB** | **idéntico a `fddbc62`** |
+| Instalador | 102/102 |
+| `build.sh` | 27/27 |
+| Textos | 36/36 |
+
+ASan, UBSan y TSan sin avisos (también `test_core` y `test_meters` con el mixer dentro del motor). Compilación cruzada de driver, app, `avmctl` y pruebas nativas sin avisos con `-Werror`.
+
+**Para revisar con atención:**
+- **Rampa por hilo dueño:** supone, como `reader_cache`, un solo lector por grupo de destinos y un solo escritor por grupo de fuentes. Si coreaudiod llamara a `ReadInput` del mismo dispositivo desde dos hilos a la vez, habría una carrera en el estado de la rampa (no en el audio del buffer).
+- **Medidores de la ventana principal:** los de los transmisores muestran ahora el nivel **después** del volumen de entrada (antes de la matriz).
+- **Almacenamiento:** se escribe en cada envío, como mucho cada 30 ms mientras se arrastra un fader.
+
+**Pendiente en el Mac** (lista en `INSTALAR.md`):
+```bash
+bash scripts/build.sh                 # incluye test_mixer, test_fader y test_mixer_ui
+sudo bash scripts/install.sh --dry-run
+sudo bash scripts/install.sh          # instalación COMPLETA (no --app-only): reinicia coreaudiod
+avmctl mixer                          # instalación nueva: todo a 0 dB sin mute
+avmctl test && avmctl test-all        # fase 2c del mixer en las 12 combinaciones
+```
+Después: fader y MUTE con el ruido rosa (sin chasquidos), Smaart con la referencia sin tocar, y la persistencia al reiniciar.
+
+## 0sexies. Revisión 11 — pantalla principal simplificada y manual en la app (sobre `cf5f158`)
 
 Encargo: compactar los receptores, quitar el distintivo «REFERENCIA LOCAL» y mover la leyenda y las explicaciones a una ventana de Ayuda con el manual completo. Antes de modificar se hizo una copia de seguridad del proyecto en `cf5f158`. **No se instaló nada ni se reinició coreaudiod.** **Solo cambia la app:**
 - el driver y `avmctl` de `dist/` son idénticos a los de `cf5f158`;

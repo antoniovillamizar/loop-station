@@ -136,7 +136,7 @@ static void test_main_window(void)
     NSView* content = c.window.contentView;
     NSButton* help = buttonTitled(content, @"Ayuda");
     CHECK(help && help.action == @selector(showHelp:), "botón «Ayuda» en la barra superior");
-    for (NSString* t in @[ @"Preset medición", @"Directo 8×8", @"Vaciar", @"Desplegar todo", @"Plegar todo", @"Recargar", @"Reparar frecuencia" ])
+    for (NSString* t in @[ @"Preset medición", @"Directo 8×8", @"Vaciar", @"Desplegar todo", @"Plegar todo", @"Recargar", @"Reparar frecuencia", @"Mixer" ])
         CHECK(buttonTitled(content, t) != nil, "se conserva el control «%s»", t.UTF8String);
     CHECK(c.ratePopup.numberOfItems == 3, "se conserva el selector de frecuencia");
     CHECK(c.statusLabel.superview && c.infoLabel.superview, "se conservan la línea de estado y la descripción de rutas");

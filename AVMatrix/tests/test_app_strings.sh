@@ -44,5 +44,15 @@ check "ayuda emergente con el nombre completo de cada canal" grep -q "addToolTip
 check "el manual se convierte con UTF8() y nunca como formato" bash -c 'grep -q "UTF8(avm_manual_sections\[i\].body)" "$1" && ! grep -qE "stringWithFormat:UTF8\(avm_manual" "$1"' _ "$APP"
 check "avm_manual.c es UTF-8 válido" bash -c 'iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1' _ "$HERE/../App/avm_manual.c"
 
+# Mixer (revisión 12).
+check "botón «Mixer» en la barra superior" grep -q 'buttonWithTitle:@"Mixer" target:self action:@selector(showMixer:)' "$APP"
+check "botones «Silenciar todos» y «Restaurar 0 dB y quitar mutes…»" bash -c 'grep -q "@\"Silenciar todos\"" "$1" && grep -q "@\"Restaurar 0 dB y quitar mutes…\"" "$1"' _ "$APP"
+check "botón MUTE en cada tira" grep -q 'buttonWithTitle:@"MUTE" target:target action:@selector(muteToggled:)' "$APP"
+check "el fader termina en 0 dB (sin amplificación)" grep -q "_fader.maxValue = 1.0;" "$APP"
+check "envíos del fader también durante el arrastre (modos comunes)" grep -q "addTimer:_sendTimer forMode:NSRunLoopCommonModes" "$APP"
+check "medidores también durante el arrastre (modos comunes)" grep -q "addTimer:self.meterTimer forMode:NSRunLoopCommonModes" "$APP"
+check "restaurar pide confirmación" bash -c 'grep -A4 "^- (void)restoreUnity:(id)sender" "$1" | grep -q "NSAlert"' _ "$APP"
+check "la app escucha los cambios del mixer en el driver" grep -q "AVM_PROPERTY_MIXER" "$APP"
+
 echo "Textos de la app: $PASS comprobaciones correctas, $FAIL fallos"
 [ $FAIL -eq 0 ]

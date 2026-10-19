@@ -8,10 +8,11 @@
 //
 // Las salidas de los tres son fuentes de la matriz; las entradas de Smaart y de
 // LISTENTO son destinos. Ver avm_core.h. La matriz se lee y se escribe mediante
-// la propiedad personalizada 'mtrx' (CFData de 16 x 18 bytes, fila = destino).
+// la propiedad personalizada 'mtrx' (CFData de 16 x 18 bytes, fila = destino) y
+// el mixer (volumen y mute por canal, solo atenuación) mediante 'mixr'.
 //
-// El driver solo transporta y enruta. No hay ecualización, efectos, análisis
-// ni delay ajustable.
+// El driver solo transporta, enruta y atenúa. No hay ecualización, efectos,
+// análisis ni delay ajustable.
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -45,6 +46,10 @@
 // Medidores de nivel (solo lectura, CFData; formato en avm_core.h, avm_meters_pack).
 // Leerla no arranca audio ni modifica nada: la app la consulta periódicamente.
 #define kAVM_PropertyMeters       'metr'
+// Mixer (CFData, formato en avm_core.h, avm_mixer_pack). Escritura: se rechaza
+// entera si algún valor no es válido (ganancia fuera de [0, 1], es decir, sin
+// amplificación). Se guarda y se recupera al reiniciar, como la matriz.
+#define kAVM_PropertyMixer        'mixr'
 
 static const Float64 kAVM_SampleRates[] = { 44100.0, 48000.0, 96000.0 };
 #define kAVM_NumSampleRates       3
@@ -318,6 +323,18 @@ static void AVM_StoreMatrix(const avm_matrix* m)
     }
 }
 
+static void AVM_StoreMixer(const avm_mixer* mx)
+{
+    if (gHost == NULL) return;
+    UInt8 blob[AVM_MIXER_BLOB_SIZE];
+    avm_mixer_pack(mx, blob);
+    CFDataRef d = CFDataCreate(kCFAllocatorDefault, blob, sizeof(blob));
+    if (d) {
+        gHost->WriteToStorage(gHost, CFSTR("mixer"), d);
+        CFRelease(d);
+    }
+}
+
 static void AVM_LoadState(void)
 {
     Float64 rate = 0;
@@ -346,6 +363,18 @@ static void AVM_LoadState(void)
             else
                 os_log_error(gLog, "AVMatrix: matriz guardada inválida; se usa la predeterminada");
         }
+        CFRelease(v);
+    }
+
+    // Mixer: sin ajustes guardados (instalación nueva), todo a 0 dB y sin mute.
+    v = NULL;
+    if (gHost->CopyFromStorage(gHost, CFSTR("mixer"), &v) == 0 && v != NULL) {
+        avm_mixer mx;
+        if (CFGetTypeID(v) == CFDataGetTypeID()
+            && avm_mixer_unpack(CFDataGetBytePtr((CFDataRef)v), (size_t)CFDataGetLength((CFDataRef)v), &mx))
+            avm_engine_set_mixer(gEngine, &mx);
+        else
+            os_log_error(gLog, "AVMatrix: mixer guardado inválido; todos los canales a 0 dB sin mute");
         CFRelease(v);
     }
 }
@@ -676,10 +705,49 @@ static OSStatus AVM_GetMetersProperty(UInt32 inDataSize, UInt32* outDataSize, vo
     return 0;
 }
 
+static OSStatus AVM_GetMixerProperty(UInt32 inDataSize, UInt32* outDataSize, void* outData)
+{
+    if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+    avm_mixer mx;
+    pthread_mutex_lock(&gStateMutex);
+    avm_engine_get_mixer(gEngine, &mx);
+    pthread_mutex_unlock(&gStateMutex);
+    UInt8 blob[AVM_MIXER_BLOB_SIZE];
+    avm_mixer_pack(&mx, blob);
+    CFDataRef d = CFDataCreate(kCFAllocatorDefault, blob, sizeof(blob));
+    if (d == NULL) return kAudioHardwareUnspecifiedError;
+    *((CFPropertyListRef*)outData) = d;  // el cliente la libera
+    *outDataSize = sizeof(CFPropertyListRef);
+    return 0;
+}
+
+// Solo publica las ganancias objetivo (almacenamientos atómicos): el hilo de
+// audio nunca espera. Cada canal llega al nuevo nivel con una rampa corta.
+static OSStatus AVM_SetMixerProperty(UInt32 inDataSize, const void* inData)
+{
+    if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+    CFPropertyListRef v = *((const CFPropertyListRef*)inData);
+    if (v == NULL || CFGetTypeID(v) != CFDataGetTypeID()) return kAudioHardwareIllegalOperationError;
+    CFDataRef d = (CFDataRef)v;
+    if (CFDataGetLength(d) != (CFIndex)AVM_MIXER_BLOB_SIZE) return kAudioHardwareBadPropertySizeError;
+    avm_mixer mx;
+    if (!avm_mixer_unpack(CFDataGetBytePtr(d), AVM_MIXER_BLOB_SIZE, &mx)) return kAudioHardwareIllegalOperationError;
+
+    pthread_mutex_lock(&gStateMutex);
+    bool ok = avm_engine_set_mixer(gEngine, &mx);
+    pthread_mutex_unlock(&gStateMutex);
+    if (!ok) return kAudioHardwareIllegalOperationError;
+
+    AVM_StoreMixer(&mx);
+    AVM_NotifyAllDevices(kAVM_PropertyMixer);
+    return 0;
+}
+
 static const AudioServerPlugInCustomPropertyInfo kCustomProps[] = {
     { kAVM_PropertyMatrix,    kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kAVM_PropertyRateState, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
-    { kAVM_PropertyMeters,    kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone }
+    { kAVM_PropertyMeters,    kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kAVM_PropertyMixer,     kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone }
 };
 
 // ---------------------------------------------------------------------------
@@ -700,6 +768,7 @@ static Boolean AVM_PlugIn_HasProperty(const AudioObjectPropertyAddress* a)
         case kAVM_PropertyMatrix:
         case kAVM_PropertyRateState:
         case kAVM_PropertyMeters:
+        case kAVM_PropertyMixer:
             return true;
     }
     return false;
@@ -719,7 +788,8 @@ static OSStatus AVM_PlugIn_GetPropertyDataSize(const AudioObjectPropertyAddress*
         case kAudioObjectPropertyCustomPropertyInfoList: *outDataSize = sizeof(kCustomProps); return 0;
         case kAVM_PropertyMatrix:
         case kAVM_PropertyRateState:
-        case kAVM_PropertyMeters:                    *outDataSize = sizeof(CFPropertyListRef); return 0;
+        case kAVM_PropertyMeters:
+        case kAVM_PropertyMixer:                     *outDataSize = sizeof(CFPropertyListRef); return 0;
     }
     return kAudioHardwareUnknownPropertyError;
 }
@@ -777,6 +847,8 @@ static OSStatus AVM_PlugIn_GetPropertyData(const AudioObjectPropertyAddress* a, 
             return AVM_GetRateStateProperty(inDataSize, outDataSize, outData);
         case kAVM_PropertyMeters:
             return AVM_GetMetersProperty(inDataSize, outDataSize, outData);
+        case kAVM_PropertyMixer:
+            return AVM_GetMixerProperty(inDataSize, outDataSize, outData);
     }
     return kAudioHardwareUnknownPropertyError;
 }
@@ -799,6 +871,7 @@ static Boolean AVM_Device_HasProperty(int dev, const AudioObjectPropertyAddress*
         case kAVM_PropertyMatrix:
         case kAVM_PropertyRateState:
         case kAVM_PropertyMeters:
+        case kAVM_PropertyMixer:
         case kAudioDevicePropertyDeviceUID:
         case kAudioDevicePropertyModelUID:
         case kAudioDevicePropertyTransportType:
@@ -873,7 +946,8 @@ static OSStatus AVM_Device_GetPropertyDataSize(int dev, const AudioObjectPropert
         case kAudioObjectPropertyCustomPropertyInfoList: *outDataSize = sizeof(kCustomProps); return 0;
         case kAVM_PropertyMatrix:
         case kAVM_PropertyRateState:
-        case kAVM_PropertyMeters:                       *outDataSize = sizeof(CFPropertyListRef); return 0;
+        case kAVM_PropertyMeters:
+        case kAVM_PropertyMixer:                        *outDataSize = sizeof(CFPropertyListRef); return 0;
         case kAudioDevicePropertyTransportType:
         case kAudioDevicePropertyClockDomain:
         case kAudioDevicePropertyDeviceIsAlive:
@@ -947,6 +1021,8 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
             return AVM_GetRateStateProperty(inDataSize, outDataSize, outData);
         case kAVM_PropertyMeters:
             return AVM_GetMetersProperty(inDataSize, outDataSize, outData);
+        case kAVM_PropertyMixer:
+            return AVM_GetMixerProperty(inDataSize, outDataSize, outData);
         case kAudioDevicePropertyTransportType: RETURN_U32(kAudioDeviceTransportTypeVirtual);
         case kAudioDevicePropertyRelatedDevices:
             if (inDataSize < sizeof(AudioObjectID)) { *outDataSize = 0; return 0; }
@@ -1153,7 +1229,8 @@ static OSStatus AVM_IsPropertySettable(AudioServerPlugInDriverRef inDriver, Audi
     if (!AVM_HasProperty(inDriver, inObjectID, inClientProcessID, inAddress)) return kAudioHardwareUnknownPropertyError;
 
     *outIsSettable = false;
-    if (inAddress->mSelector == kAVM_PropertyMatrix || inAddress->mSelector == kAVM_PropertyRateState) {
+    if (inAddress->mSelector == kAVM_PropertyMatrix || inAddress->mSelector == kAVM_PropertyRateState
+        || inAddress->mSelector == kAVM_PropertyMixer) {
         *outIsSettable = true;
     } else if (AVM_DeviceIndex(inObjectID) >= 0) {
         *outIsSettable = (inAddress->mSelector == kAudioDevicePropertyNominalSampleRate);
@@ -1212,6 +1289,10 @@ static OSStatus AVM_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioOb
     if (inAddress->mSelector == kAVM_PropertyMatrix
         && (inObjectID == kObj_PlugIn || AVM_DeviceIndex(inObjectID) >= 0))
         return AVM_SetMatrixProperty(inDataSize, inData);
+
+    if (inAddress->mSelector == kAVM_PropertyMixer
+        && (inObjectID == kObj_PlugIn || AVM_DeviceIndex(inObjectID) >= 0))
+        return AVM_SetMixerProperty(inDataSize, inData);
 
     if (inAddress->mSelector == kAVM_PropertyRateState
         && (inObjectID == kObj_PlugIn || AVM_DeviceIndex(inObjectID) >= 0)) {

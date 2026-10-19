@@ -39,6 +39,8 @@ Al final debe decir **«Prueba en seco correcta»**. Si sale **ERROR**, para aqu
 
 La instalación reinicia el servicio de audio de macOS (`coreaudiod`), y **todo el audio del Mac se corta unos segundos**. Cierra también Spotify, Tidal, tu DAW y cualquier otra app de audio.
 
+> **Revisión 12 (mixer): esta versión cambia el driver.** Instálala con `scripts/install.sh` completo (pasos 3 y 4), **no** con `--app-only`. Al instalar se reinicia coreaudiod.
+
 ## 4. Instalar
 
 - Opción A: `sudo bash scripts/install.sh`
@@ -96,6 +98,12 @@ Anota lo que observes:
 - [ ] Cierra y abre la app: ¿se conservan los nombres con sus tildes?
 - [ ] Pantalla compacta: ¿se leen número, nombre, barra, dBFS y saturación de cada receptor sin solaparse, y la Entrada 8 sin rótulo naranja?
 - [ ] Botón «Ayuda» y menú Ayuda → Manual de AV Matrix: ¿se abre el manual? ¿Lleva cada entrada del índice a su sección? ¿Se puede agrandar y achicar la ventana?
+- [ ] Mixer recién instalado: ¿los 34 canales están a 0 dB y sin MUTE? (`avmctl mixer` debe decir «Todos los canales a 0 dB y sin mute».)
+- [ ] `avmctl test`: ¿pasa también la fase del mixer (−6 dB, MUTE, suma · −6 dB) y termina con «Matriz, mixer, frecuencia y formatos restaurados»?
+- [ ] Con el ruido rosa: baja el fader de **LISTENTO Envío 1** a unos −12 dB. ¿Baja su medidor sin chasquidos y sin cortes? ¿Smaart Entrada 8 (referencia) sigue igual? Vuelve a 0 dB con doble clic.
+- [ ] MUTE en **Smaart Entrada 8**: ¿Smaart deja de ver la referencia? Quita el MUTE: ¿vuelve al nivel anterior?
+- [ ] «Silenciar todos» y después «Restaurar 0 dB y quitar mutes…»: ¿se silencia todo y vuelve todo a 0 dB (con confirmación)?
+- [ ] Cierra la app y reinicia el Mac: ¿se conservan los ajustes del mixer?
 
 ## 7. Al terminar
 
