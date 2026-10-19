@@ -42,6 +42,9 @@
 // la frecuencia a aplicar en los tres dispositivos (0 = la actual): es la vía de
 // recuperación que no depende de que el host reenvíe una frecuencia sin cambios.
 #define kAVM_PropertyRateState    'rsta'
+// Medidores de nivel (solo lectura, CFData; formato en avm_core.h, avm_meters_pack).
+// Leerla no arranca audio ni modifica nada: la app la consulta periódicamente.
+#define kAVM_PropertyMeters       'metr'
 
 static const Float64 kAVM_SampleRates[] = { 44100.0, 48000.0, 96000.0 };
 #define kAVM_NumSampleRates       3
@@ -659,9 +662,24 @@ static OSStatus AVM_GetRateStateProperty(UInt32 inDataSize, UInt32* outDataSize,
     return 0;
 }
 
+static OSStatus AVM_GetMetersProperty(UInt32 inDataSize, UInt32* outDataSize, void* outData)
+{
+    if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+    avm_meter_reading src[AVM_NUM_SOURCES], dst[AVM_NUM_DESTS];
+    avm_engine_meter_snapshot(gEngine, AVM_NowNs(), src, dst);
+    UInt8 blob[AVM_METERS_BLOB_SIZE];
+    avm_meters_pack(src, dst, blob);
+    CFDataRef d = CFDataCreate(kCFAllocatorDefault, blob, sizeof(blob));
+    if (d == NULL) return kAudioHardwareUnspecifiedError;
+    *((CFPropertyListRef*)outData) = d;  // el cliente la libera
+    *outDataSize = sizeof(CFPropertyListRef);
+    return 0;
+}
+
 static const AudioServerPlugInCustomPropertyInfo kCustomProps[] = {
     { kAVM_PropertyMatrix,    kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
-    { kAVM_PropertyRateState, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone }
+    { kAVM_PropertyRateState, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kAVM_PropertyMeters,    kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone }
 };
 
 // ---------------------------------------------------------------------------
@@ -681,6 +699,7 @@ static Boolean AVM_PlugIn_HasProperty(const AudioObjectPropertyAddress* a)
         case kAudioObjectPropertyCustomPropertyInfoList:
         case kAVM_PropertyMatrix:
         case kAVM_PropertyRateState:
+        case kAVM_PropertyMeters:
             return true;
     }
     return false;
@@ -699,7 +718,8 @@ static OSStatus AVM_PlugIn_GetPropertyDataSize(const AudioObjectPropertyAddress*
         case kAudioPlugInPropertyResourceBundle:     *outDataSize = sizeof(CFStringRef); return 0;
         case kAudioObjectPropertyCustomPropertyInfoList: *outDataSize = sizeof(kCustomProps); return 0;
         case kAVM_PropertyMatrix:
-        case kAVM_PropertyRateState:                 *outDataSize = sizeof(CFPropertyListRef); return 0;
+        case kAVM_PropertyRateState:
+        case kAVM_PropertyMeters:                    *outDataSize = sizeof(CFPropertyListRef); return 0;
     }
     return kAudioHardwareUnknownPropertyError;
 }
@@ -755,6 +775,8 @@ static OSStatus AVM_PlugIn_GetPropertyData(const AudioObjectPropertyAddress* a, 
             return AVM_GetMatrixProperty(inDataSize, outDataSize, outData);
         case kAVM_PropertyRateState:
             return AVM_GetRateStateProperty(inDataSize, outDataSize, outData);
+        case kAVM_PropertyMeters:
+            return AVM_GetMetersProperty(inDataSize, outDataSize, outData);
     }
     return kAudioHardwareUnknownPropertyError;
 }
@@ -776,6 +798,7 @@ static Boolean AVM_Device_HasProperty(int dev, const AudioObjectPropertyAddress*
         case kAudioObjectPropertyCustomPropertyInfoList:
         case kAVM_PropertyMatrix:
         case kAVM_PropertyRateState:
+        case kAVM_PropertyMeters:
         case kAudioDevicePropertyDeviceUID:
         case kAudioDevicePropertyModelUID:
         case kAudioDevicePropertyTransportType:
@@ -849,7 +872,8 @@ static OSStatus AVM_Device_GetPropertyDataSize(int dev, const AudioObjectPropert
         case kAudioObjectPropertyControlList:           *outDataSize = 0; return 0;
         case kAudioObjectPropertyCustomPropertyInfoList: *outDataSize = sizeof(kCustomProps); return 0;
         case kAVM_PropertyMatrix:
-        case kAVM_PropertyRateState:                    *outDataSize = sizeof(CFPropertyListRef); return 0;
+        case kAVM_PropertyRateState:
+        case kAVM_PropertyMeters:                       *outDataSize = sizeof(CFPropertyListRef); return 0;
         case kAudioDevicePropertyTransportType:
         case kAudioDevicePropertyClockDomain:
         case kAudioDevicePropertyDeviceIsAlive:
@@ -921,6 +945,8 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
             return AVM_GetMatrixProperty(inDataSize, outDataSize, outData);
         case kAVM_PropertyRateState:
             return AVM_GetRateStateProperty(inDataSize, outDataSize, outData);
+        case kAVM_PropertyMeters:
+            return AVM_GetMetersProperty(inDataSize, outDataSize, outData);
         case kAudioDevicePropertyTransportType: RETURN_U32(kAudioDeviceTransportTypeVirtual);
         case kAudioDevicePropertyRelatedDevices:
             if (inDataSize < sizeof(AudioObjectID)) { *outDataSize = 0; return 0; }
@@ -1363,12 +1389,12 @@ static OSStatus AVM_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObje
             memset(ioMainBuffer, 0, (size_t)inIOBufferFrameSize * channels * avm_format_bytes_per_sample(fmt));
             return 0;
         }
-        avm_engine_read(gEngine, (avm_dst_group)d->dstGroup, (int64_t)inIOCycleInfo->mInputTime.mSampleTime,
-                        inIOBufferFrameSize, ioMainBuffer, fmt, channels);
+        avm_engine_read_metered(gEngine, (avm_dst_group)d->dstGroup, (int64_t)inIOCycleInfo->mInputTime.mSampleTime,
+                                inIOBufferFrameSize, ioMainBuffer, fmt, channels, AVM_NowNs());
     } else if (inOperationID == kAudioServerPlugInIOOperationWriteMix && !isInput) {
         if (!active) return 0;
-        avm_engine_write(gEngine, d->srcGroup, (int64_t)inIOCycleInfo->mOutputTime.mSampleTime,
-                         inIOBufferFrameSize, ioMainBuffer, fmt, channels);
+        avm_engine_write_metered(gEngine, d->srcGroup, (int64_t)inIOCycleInfo->mOutputTime.mSampleTime,
+                                 inIOBufferFrameSize, ioMainBuffer, fmt, channels, AVM_NowNs());
     }
     return 0;
 }

@@ -102,6 +102,22 @@ OSStatus avm_recover_rate(Float64 rate)
     return err;
 }
 
+OSStatus avm_get_meters(avm_meter_reading src[AVM_NUM_SOURCES], avm_meter_reading dst[AVM_NUM_DESTS])
+{
+    AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);
+    if (dev == kAudioObjectUnknown) return kAudioHardwareBadDeviceError;
+    AudioObjectPropertyAddress a = { AVM_PROPERTY_METERS, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFPropertyListRef plist = NULL;
+    UInt32 size = sizeof(plist);
+    OSStatus err = AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &plist);
+    if (err != noErr) return err;
+    if (plist == NULL) return kAudioHardwareUnspecifiedError;
+    bool ok = CFGetTypeID(plist) == CFDataGetTypeID()
+        && avm_meters_unpack(CFDataGetBytePtr((CFDataRef)plist), (size_t)CFDataGetLength((CFDataRef)plist), src, dst);
+    CFRelease(plist);
+    return ok ? noErr : kAudioHardwareBadPropertySizeError;
+}
+
 OSStatus avm_get_sample_rate(Float64* out)
 {
     AudioObjectID dev = avm_find_device(AVM_DEV_SMAART);

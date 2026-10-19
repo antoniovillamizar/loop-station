@@ -54,6 +54,23 @@ Cada casilla conecta una fuente con un destino a **ganancia unidad** (0 dB). No 
 
 Con el preset de medición, Smaart genera ruido rosa por la Salida 1. La señal va a Colombia por LISTENTO Envío 1 y también llega a la Entrada 8 como referencia local. En Smaart: medición = Entrada 1 (retorno), referencia = Entrada 8. El retardo de ida y vuelta por internet lo encuentra el buscador de delay de Smaart; AV Matrix no lo compensa. Smaart ve el canal 8 con el nombre «Entrada 8 (referencia local)».
 
+### Medidores de nivel
+
+Cada canal tiene, junto a su nombre, una **barra de nivel**, la **lectura de pico en dBFS** y un **indicador rojo de saturación**:
+
+| Dónde | Qué mide |
+| --- | --- |
+| **Transmisores (arriba, bajo cada nombre vertical):** Smaart Salidas 1-8, LISTENTO Retornos 1-8, Música L/R | La señal que la aplicación envía, **antes de la matriz**. Si varias apps usan la misma salida, incluye la mezcla que hace macOS |
+| **Receptores (izquierda, a la derecha de cada nombre):** Smaart Entradas 1-8, LISTENTO Envíos 1-8 | La señal **realmente entregada**, después del enrutamiento y de la **suma** de las conexiones. No repite el medidor de la fuente: una entrada sin conexiones marca silencio aunque la fuente tenga señal |
+
+- **Escala:** de -60 a 0 dBFS. Verde hasta -18, amarillo hasta -6 y naranja hasta 0. Un destino que suma por encima de 0 dBFS muestra valores positivos (por ejemplo +3,2).
+- **Saturación:** el LED rojo se enciende cuando una muestra llega a escala completa. En una fuente: 0 dBFS, o el código máximo si el formato es entero. En un destino: una suma de 1,0 o más. Se mantiene 2 s.
+- **«—»** = no llega audio a ese canal (la app no lo usa o el audio se detuvo; tarda como mucho 0,25 s). **«−∞»** = llega audio, pero es silencio digital.
+- El pico se calcula por ventanas de 50 ms; un pico antiguo desaparece en 0,1 s.
+- **La medición no modifica el audio.** El driver observa los mismos valores que ya transporta: sin copias, sin procesamiento, sin cambios de ganancia ni retardo, y sin bloquear el hilo de audio (solo operaciones atómicas). Las pruebas comprueban que lo transportado es idéntico bit a bit con medición y sin ella.
+- **La app no abre audio.** Solo lee 15 veces por segundo la propiedad `'metr'` del driver, y únicamente con la ventana visible. Abrirla o cerrarla no afecta a Smaart ni a LISTENTO.
+- En la Terminal: `avmctl meters` (una lectura) o `avmctl meters --watch`.
+
 ## 3. Compilar
 
 Requisitos: un Mac con las **Command Line Tools** de Xcode (no hace falta Xcode completo).
@@ -132,6 +149,7 @@ avmctl disconnect listento.out.8 smaart.in.8
 avmctl preset default | direct | clear   (default = medición)
 avmctl rate 44100 | 48000 | 96000
 avmctl recover                      repara una frecuencia inconsistente (sin audio activo)
+avmctl meters [--watch]             medidores de nivel de los 34 canales (no abre audio)
 avmctl format smaart in s24         (smaart|listento|music, in|out, f32|s32|s24|s16)
 avmctl test                         autoprueba a la frecuencia actual
 avmctl test-all                     autoprueba en 3 frecuencias x 4 formatos (~1 min)

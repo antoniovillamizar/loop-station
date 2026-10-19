@@ -198,6 +198,111 @@ void avm_float_to_sample(float v, void* dst, avm_format fmt)
 // ---------------------------------------------------------------------------
 // Motor
 
+static void avm_meter_init(avm_meter* m)
+{
+    atomic_init(&m->epoch, 0);
+    atomic_init(&m->cur_peak, 0.0f);
+    atomic_init(&m->prev_peak, 0.0f);
+    atomic_init(&m->last_update_ns, 0);
+    atomic_init(&m->last_clip_ns, 0);
+}
+
+// Un solo escritor por medidor: sin bucles ni esperas.
+static void avm_meter_update(avm_meter* m, float peak, bool clip, uint64_t now_ns)
+{
+    uint64_t ep = now_ns / AVM_METER_EPOCH_NS;
+    uint64_t cur_ep = atomic_load_explicit(&m->epoch, memory_order_relaxed);
+    if (ep != cur_ep) {
+        float carried = (ep == cur_ep + 1) ? atomic_load_explicit(&m->cur_peak, memory_order_relaxed) : 0.0f;
+        atomic_store_explicit(&m->prev_peak, carried, memory_order_relaxed);
+        atomic_store_explicit(&m->cur_peak, peak, memory_order_relaxed);
+        atomic_store_explicit(&m->epoch, ep, memory_order_release);
+    } else if (peak > atomic_load_explicit(&m->cur_peak, memory_order_relaxed)) {
+        atomic_store_explicit(&m->cur_peak, peak, memory_order_relaxed);
+    }
+    if (clip) atomic_store_explicit(&m->last_clip_ns, now_ns, memory_order_relaxed);
+    atomic_store_explicit(&m->last_update_ns, now_ns, memory_order_release);
+}
+
+static avm_meter_reading avm_meter_read(avm_meter* m, uint64_t now_ns)
+{
+    avm_meter_reading r = { 0.0f, false, false };
+    uint64_t last = atomic_load_explicit(&m->last_update_ns, memory_order_acquire);
+    uint64_t clip = atomic_load_explicit(&m->last_clip_ns, memory_order_relaxed);
+    r.clip = clip != 0 && now_ns >= clip && now_ns - clip < AVM_METER_CLIP_HOLD_NS;
+    r.active = last != 0 && now_ns >= last && now_ns - last < AVM_METER_ACTIVE_NS;
+    if (!r.active) return r;  // sin bloques recientes: nunca se muestra un valor antiguo
+    uint64_t ep_now = now_ns / AVM_METER_EPOCH_NS;
+    uint64_t ep = atomic_load_explicit(&m->epoch, memory_order_acquire);
+    float cur = atomic_load_explicit(&m->cur_peak, memory_order_relaxed);
+    float prev = atomic_load_explicit(&m->prev_peak, memory_order_relaxed);
+    if (ep == ep_now)          r.peak = cur > prev ? cur : prev;
+    else if (ep + 1 == ep_now) r.peak = cur;
+    return r;
+}
+
+void avm_engine_meter_snapshot(avm_engine* e, uint64_t now_ns,
+                               avm_meter_reading src[AVM_NUM_SOURCES],
+                               avm_meter_reading dst[AVM_NUM_DESTS])
+{
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) src[i] = avm_meter_read(&e->src_meters[i], now_ns);
+    for (int i = 0; i < AVM_NUM_DESTS; i++) dst[i] = avm_meter_read(&e->dst_meters[i], now_ns);
+}
+
+static void avm_put_u32(uint8_t* p, uint32_t v) { memcpy(p, &v, 4); }
+static uint32_t avm_get_u32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+void avm_meters_pack(const avm_meter_reading src[AVM_NUM_SOURCES],
+                     const avm_meter_reading dst[AVM_NUM_DESTS], uint8_t out[AVM_METERS_BLOB_SIZE])
+{
+    memset(out, 0, AVM_METERS_BLOB_SIZE);
+    avm_put_u32(out, 0x41564D31u);  // 'AVM1'
+    avm_put_u32(out + 4, AVM_NUM_SOURCES);
+    avm_put_u32(out + 8, AVM_NUM_DESTS);
+    for (int i = 0; i < AVM_NUM_SOURCES + AVM_NUM_DESTS; i++) {
+        const avm_meter_reading* r = i < AVM_NUM_SOURCES ? &src[i] : &dst[i - AVM_NUM_SOURCES];
+        uint8_t* p = out + 16 + 8 * i;
+        memcpy(p, &r->peak, 4);
+        p[4] = r->active ? 1 : 0;
+        p[5] = r->clip ? 1 : 0;
+    }
+}
+
+bool avm_meters_unpack(const uint8_t* blob, size_t len,
+                       avm_meter_reading src[AVM_NUM_SOURCES], avm_meter_reading dst[AVM_NUM_DESTS])
+{
+    if (blob == NULL || len != AVM_METERS_BLOB_SIZE) return false;
+    if (avm_get_u32(blob) != 0x41564D31u || avm_get_u32(blob + 4) != AVM_NUM_SOURCES
+        || avm_get_u32(blob + 8) != AVM_NUM_DESTS)
+        return false;
+    for (int i = 0; i < AVM_NUM_SOURCES + AVM_NUM_DESTS; i++) {
+        avm_meter_reading* r = i < AVM_NUM_SOURCES ? &src[i] : &dst[i - AVM_NUM_SOURCES];
+        const uint8_t* p = blob + 16 + 8 * i;
+        memcpy(&r->peak, p, 4);
+        if (!isfinite(r->peak) || r->peak < 0.0f) r->peak = 0.0f;
+        r->active = p[4] != 0;
+        r->clip = p[5] != 0;
+    }
+    return true;
+}
+
+float avm_format_clip_level(avm_format fmt)
+{
+    switch (fmt) {
+        case AVM_FMT_SINT24: return 8388607.0f / 8388608.0f;
+        case AVM_FMT_SINT16: return 32767.0f / 32768.0f;
+        case AVM_FMT_SINT32:  // 2147483647/2^31 se representa como 1.0 en float
+        case AVM_FMT_FLOAT32:
+        default:             return 1.0f;
+    }
+}
+
+float avm_peak_to_dbfs(float peak)
+{
+    if (!(peak > 0.0f)) return -INFINITY;
+    return 20.0f * log10f(peak);
+}
+
 static void avm_ring_zero_all(avm_engine* e)
 {
     for (int s = 0; s < AVM_NUM_SOURCES; s++)
@@ -253,6 +358,8 @@ void avm_engine_init(avm_engine* e)
     for (int g = 0; g < AVM_DST_GROUP_COUNT; g++)
         e->reader_cache[g] = m;
     atomic_init(&e->stale_matrix_reads, 0);
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_meter_init(&e->src_meters[i]);
+    for (int i = 0; i < AVM_NUM_DESTS; i++) avm_meter_init(&e->dst_meters[i]);
 }
 
 void avm_engine_reset(avm_engine* e)
@@ -300,6 +407,13 @@ void avm_engine_write(avm_engine* e, avm_src_group g, int64_t sample_time,
                       uint32_t frames, const void* interleaved, avm_format fmt,
                       uint32_t channels)
 {
+    avm_engine_write_metered(e, g, sample_time, frames, interleaved, fmt, channels, 0);
+}
+
+void avm_engine_write_metered(avm_engine* e, avm_src_group g, int64_t sample_time,
+                              uint32_t frames, const void* interleaved, avm_format fmt,
+                              uint32_t channels, uint64_t now_ns)
+{
     if ((int)g < 0 || g >= AVM_SRC_GROUP_COUNT || frames == 0 || interleaved == NULL)
         return;
     const int base = avm_src_group_base(g);
@@ -323,6 +437,7 @@ void avm_engine_write(avm_engine* e, avm_src_group g, int64_t sample_time,
 
     const uint8_t* in = (const uint8_t*)interleaved;
     const uint32_t frame_bytes = bps * channels;
+    float peak[AVM_CHANNELS_PER_PORT] = { 0 };
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
         if (t < 0) continue;
@@ -331,16 +446,31 @@ void avm_engine_write(avm_engine* e, avm_src_group g, int64_t sample_time,
         for (int c = 0; c < nch; c++) {
             float v = ((uint32_t)c < channels) ? avm_sample_to_float(fp + (size_t)c * bps, fmt) : 0.0f;
             atomic_store_explicit(&e->ring[base + c][idx], v, memory_order_relaxed);
+            float a = fabsf(v);  // medición: solo se observa el valor ya convertido
+            if (a > peak[c]) peak[c] = a;
         }
     }
 
     if (end > we)
         atomic_store_explicit(&e->written_end[g], end, memory_order_release);
+
+    if (now_ns != 0) {
+        const float clip_level = avm_format_clip_level(fmt);
+        for (int c = 0; c < nch; c++)
+            avm_meter_update(&e->src_meters[base + c], peak[c], peak[c] >= clip_level, now_ns);
+    }
 }
 
 bool avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
                      uint32_t frames, void* interleaved, avm_format fmt,
                      uint32_t channels)
+{
+    return avm_engine_read_metered(e, g, sample_time, frames, interleaved, fmt, channels, 0);
+}
+
+bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time,
+                             uint32_t frames, void* interleaved, avm_format fmt,
+                             uint32_t channels, uint64_t now_ns)
 {
     if ((int)g < 0 || g >= AVM_DST_GROUP_COUNT || frames == 0 || interleaved == NULL)
         return true;
@@ -381,6 +511,7 @@ bool avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
 
     uint8_t* out = (uint8_t*)interleaved;
     const uint32_t frame_bytes = bps * channels;
+    float peak[AVM_CHANNELS_PER_PORT] = { 0 };
     for (uint32_t f = 0; f < frames; f++) {
         int64_t t = sample_time + (int64_t)f;
         int64_t idx = t & AVM_RING_MASK;
@@ -396,6 +527,10 @@ bool avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
                 }
             }
             avm_float_to_sample(acc, fp + (size_t)c * bps, fmt);
+            if ((int)c < dnch) {
+                float a = fabsf(acc);  // medición: el valor sumado que se entrega
+                if (a > peak[c]) peak[c] = a;
+            }
         }
     }
 
@@ -409,8 +544,14 @@ bool avm_engine_read(avm_engine* e, avm_dst_group g, int64_t sample_time,
         if (wb - (int64_t)AVM_RING_FRAMES > sample_time) {
             memset(out, 0, (size_t)frames * frame_bytes);  // cero en todos los formatos
             atomic_fetch_add_explicit(&e->overrun_reads, 1, memory_order_relaxed);
+            if (now_ns != 0)
+                for (int c = 0; c < dnch; c++)  // se entregó silencio: eso se mide
+                    avm_meter_update(&e->dst_meters[dbase + c], 0.0f, false, now_ns);
             return false;
         }
     }
+    if (now_ns != 0)
+        for (int c = 0; c < dnch; c++)
+            avm_meter_update(&e->dst_meters[dbase + c], peak[c], peak[c] >= 1.0f, now_ns);
     return true;
 }

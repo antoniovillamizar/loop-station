@@ -1,8 +1,71 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2, 3 y 4; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 5; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 4 — textos UTF-8 en la app (sobre `de78154`)
+## 0. Revisión 5 — medidores de nivel en tiempo real (sobre `6658962`)
+
+Petición de Antonio: medidores por canal (barra, dBFS y saturación) en las 18 fuentes y los 16 destinos, junto a los nombres. Se conservan la matriz tipo Dante, los grupos desplegables, la REFERENCIA LOCAL, las conexiones y los presets. Antes de modificar se hizo una copia de seguridad del proyecto en `6658962`. **No se instaló nada ni se reinició coreaudiod.**
+
+### Qué se comprobó en un Mac y qué solo en Linux
+
+- **En un Mac: nada de esta revisión.** Lo único verificado en Mac hasta ahora es lo que Codex comprobó sobre `de78154`: compilación, pruebas y matriz nativa. Los medidores no se han visto en pantalla ni se han medido con el driver cargado en coreaudiod.
+- **En Linux:** todas las pruebas de esta sección (núcleo de medición, pruebas de mutación, sanitizers), compilación cruzada contra el SDK 15.5 y maquetas renderizadas con Chromium.
+- **Preparado para el Mac:** `avmctl test` incluye ahora la comprobación de los medidores reales del driver (ver §0.5.4), e `INSTALAR.md` tiene la lista de comprobaciones manuales con Smaart.
+
+### 0.5.1 Medición en el driver (`Driver/src/avm_core.[ch]`)
+
+- **Fuentes** (`avm_engine_write_metered`, `avm_core.c:413`): pico absoluto de cada muestra **ya convertida a float y escrita en el buffer**, antes de la matriz.
+- **Destinos** (`avm_engine_read_metered`, `avm_core.c:471`): pico absoluto del **valor sumado por la matriz** (`acc`), el mismo que se convierte y se entrega. Mide la señal real tras el enrutamiento y la suma, no la fuente. Si el bloque se descarta por vuelta del escritor, se mide el silencio entregado.
+- **Saturación:**
+  - fuente: |x| ≥ escala completa de su formato físico (`avm_format_clip_level`, `avm_core.c:289`: 1,0 para Float32 y SInt32, 8388607/8388608 para SInt24, 32767/32768 para SInt16);
+  - destino: |suma| ≥ 1,0.
+  - El indicador se mantiene 2 s.
+- **Tiempo real** (`avm_meter_update`, `avm_core.c:211`):
+  - un solo escritor por medidor (el hilo de IO de su dispositivo), solo cargas y almacenamientos atómicos;
+  - sin bucles CAS, sin mutex, sin memoria nueva y sin llamadas al sistema;
+  - la hora es `mach_absolute_time` convertida a ns, que ya se usaba.
+  - El coste por bloque es un `fabsf` + comparación por muestra y canal, y unas pocas escrituras atómicas por canal.
+- **Sin valores antiguos** (`avm_meter_read`, `avm_core.c:227`):
+  - pico por ventanas de 50 ms; la lectura devuelve el máximo de la ventana actual y la anterior, **sin borrar**, así varios lectores (app, `avmctl`) no se roban picos;
+  - sin bloques nuevos en 250 ms el medidor queda **inactivo** con pico 0.
+- **Las variantes sin medición** (`avm_engine_write/read`) se mantienen como envoltorios con `now_ns = 0`, que no miden. Las pruebas existentes no cambian.
+
+### 0.5.2 Propiedad `'metr'` (`Driver/src/AVMatrixDriver.c`)
+
+- CFData de solo lectura (`AVM_GetMetersProperty`, `AVMatrixDriver.c:665`) en el plug-in y en los tres dispositivos. Formato: cabecera `'AVM1'` y 34 × (float pico, activo, saturación) (`avm_meters_pack/unpack`).
+- El IO usa las variantes medidas (`AVMatrixDriver.c:1392`, `:1396`).
+- **Leer la propiedad no abre ni arranca audio.**
+
+### 0.5.3 App (`App/AVMatrixApp.m`)
+
+- **Receptores:** a la derecha del nombre, barra horizontal de 64 pt, dBFS con un decimal y LED de saturación. La etiqueta REFERENCIA LOCAL de la Entrada 8 se mantiene.
+- **Transmisores:** bajo el nombre vertical, LED de saturación, barra vertical de 50 pt y dBFS entero.
+- **Textos:** «—» = sin audio, «−∞» = silencio digital. Colores de sistema (verde, amarillo, naranja, rojo y `labelColor` con transparencia) para los modos claro y oscuro.
+- **Ratón:** la línea inferior da el nivel exacto, «antes de la matriz» o «entregado, después de la matriz», y la saturación.
+- **Consulta** (`startMeters`, `:616`; `pollMeters`, `:626`): un temporizador lee `'metr'` 15 veces por segundo, solo con la ventana visible. Sin driver, todo se muestra como «—».
+- **Geometría:** nombres 336 pt y cabecera 184 pt. La ventana sigue ajustándose a la matriz.
+
+### 0.5.4 Pruebas
+
+| Prueba | Dónde | Resultado |
+| --- | --- | --- |
+| `tests/test_meters.c` (nueva, 41 comprobaciones): silencio, señal conocida, separación de 18 canales, destinos tras la matriz, suma, saturación, sin valores antiguos, medición sin efecto sobre el audio, empaquetado y concurrencia (≈9 M lecturas, TSan) | Linux | **41/41**; ASan, UBSan y TSan sin avisos |
+| Mutaciones: el destino mide el máximo de las fuentes en vez de la suma (1 fallo); valores antiguos visibles (4 fallos); saturación de destino desactivada (2 fallos) | Linux | Las tres se detectan |
+| Núcleo, frecuencia, instalador, `build.sh` y textos | Linux | 122/122, 115/115, 57/57, 7/7, 8/8 |
+| Compilación cruzada de driver, app y `avmctl` (arm64 + x86_64, `-Werror`); el driver solo exporta `_AVMatrix_Create` | Linux, SDK 15.5 | Sin avisos |
+| Maquetas en modo claro y oscuro con la geometría de la app | Linux (Chromium) | Entregadas aparte; **no son capturas del Mac** |
+| **`avmctl test` con los medidores reales:** nivel exacto (±1e-6) de las 34 líneas con valores distintos por canal (separación) y `smaart.in.1` = retorno 1 + retorno 2 (suma); saturación (Salida 1 a 0 dBFS y Envío 2 = 0,6 + 0,6 → SAT, Envío 3 sin ruta → silencio); los 34 inactivos 0,4 s después de parar; en `test-all`, las 12 combinaciones de frecuencia y formato | **Pendiente en el Mac** | Compila; no ejecutado |
+| Lista manual de `INSTALAR.md` §6: nivel junto al de Smaart, «—» con LISTENTO cerrado, LED a 0 dBFS, «—» al detener, cerrar y abrir la app sin cortes | **Pendiente en el Mac** | — |
+
+### 0.5.5 Límites y riesgos
+
+- **Medidor de pico, no RMS ni LUFS.** No es un analizador; Smaart sigue haciendo el análisis.
+- **El pico de una fuente** es lo que llega al driver tras la mezcla del HAL de macOS. Si dos apps envían a la misma salida, se ve la suma.
+- **Un destino que nadie lee** (por ejemplo, LISTENTO cerrado) muestra «—»: no hay señal entregada que medir.
+- **Inexacto por diseño en la pantalla:** la lectura es de picos en ventanas de 50-100 ms con consulta cada 67 ms, así que un pico de una sola muestra puede no verse si cae justo entre lecturas. La prueba lo comprueba con señales constantes.
+- **Coste de la consulta:** 15 lecturas por segundo de una propiedad de 288 bytes a través de coreaudiod. Se espera un coste despreciable, pero no se ha medido.
+
+## 0quinquies. Revisión 4 — textos UTF-8 en la app (sobre `de78154`)
 
 Codex comprobó `de78154` en el Mac (compilación, pruebas y matriz nativa) y detectó que «Música» se mostraba como «M√∫sica».
 

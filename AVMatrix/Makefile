@@ -18,6 +18,8 @@ test:
 	./$(BUILD)/test_core
 	$(CC) $(CFLAGS) -o $(BUILD)/test_rate tests/test_rate.c Driver/src/avm_rate.c
 	./$(BUILD)/test_rate
+	$(CC) $(CFLAGS) -o $(BUILD)/test_meters tests/test_meters.c Driver/src/avm_core.c -lm -lpthread
+	./$(BUILD)/test_meters
 	bash tests/test_install.sh
 	bash tests/test_build_script.sh
 	bash tests/test_app_strings.sh
@@ -30,6 +32,10 @@ test-sanitize:
 	./$(BUILD)/test_core_tsan
 	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_rate_asan tests/test_rate.c Driver/src/avm_rate.c
 	./$(BUILD)/test_rate_asan
+	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_meters_asan tests/test_meters.c Driver/src/avm_core.c -lm -lpthread
+	./$(BUILD)/test_meters_asan
+	gcc -std=c11 -O1 -g -fsanitize=thread -o $(BUILD)/test_meters_tsan tests/test_meters.c Driver/src/avm_core.c -lm -lpthread
+	./$(BUILD)/test_meters_tsan
 
 cross:
 	@test -n "$(SDK)" || (echo "Indique SDK=/ruta/MacOSX.sdk" && false)

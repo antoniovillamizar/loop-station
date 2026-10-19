@@ -57,6 +57,8 @@ clang $CFLAGS -o "$OUT/test_core" tests/test_core.c Driver/src/avm_core.c
 "$OUT/test_core"
 clang $CFLAGS -o "$OUT/test_rate" tests/test_rate.c Driver/src/avm_rate.c
 "$OUT/test_rate"
+clang $CFLAGS -o "$OUT/test_meters" tests/test_meters.c Driver/src/avm_core.c
+"$OUT/test_meters"
 bash tests/test_install.sh
 bash tests/test_app_strings.sh
 

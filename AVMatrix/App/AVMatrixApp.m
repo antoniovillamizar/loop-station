@@ -7,6 +7,10 @@
 //              Smaart (entradas 1-8; la 8 es REFERENCIA LOCAL), LISTENTO (envíos 1-8).
 //   Cruce      casilla verde con ✓ = conectado; casilla vacía = desconectado;
 //              casilla gris con × = bloqueada (lazo de realimentación).
+//   Medidores  junto a cada nombre: pico en dBFS, barra y LED rojo de saturación.
+//              Fuentes: nivel antes de la matriz. Destinos: señal real entregada,
+//              después del enrutamiento y de la suma. «—» = sin audio en ese canal.
+//              La app solo lee la propiedad 'metr' del driver: no abre audio.
 //
 // Cada casilla conecta una fuente con un destino a ganancia unidad. No hay
 // ganancias, ecualización, efectos ni delay. El driver también rechaza los lazos.
@@ -83,17 +87,31 @@ typedef struct {
 @property (weak) id<AVMMatrixViewDelegate> delegate;
 @property (nonatomic, assign) BOOL enabled;
 - (void)setMatrix:(const avm_matrix*)m;
+- (void)setMeterSources:(const avm_meter_reading*)src dests:(const avm_meter_reading*)dst;
 - (void)expandAll:(BOOL)expanded;
 @end
 
 // Geometría (puntos).
 static const CGFloat kCell = 20.0;      // lado de cada casilla
-static const CGFloat kLeftW = 200.0;    // ancho de los nombres de los receptores
-static const CGFloat kTopH = 104.0;     // alto de los nombres verticales de los transmisores
-static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derecha
+static const CGFloat kLeftW = 336.0;    // nombres de los receptores + sus medidores
+static const CGFloat kTopH = 184.0;     // nombres verticales de los transmisores + sus medidores
+static const CGFloat kSumW = 40.0;      // columna de aviso de suma, a la derecha
+
+// Medidores de los receptores (a la derecha del nombre, en cada fila).
+static const CGFloat kRxMeterX = 204.0, kRxMeterW = 64.0;
+static const CGFloat kRxDbX = 272.0, kRxDbW = 44.0;
+static const CGFloat kRxClipX = 320.0;
+// Medidores de los transmisores (debajo del nombre vertical, en cada columna).
+static const CGFloat kTxMeterH = 80.0;  // LED + barra + dBFS
+static const CGFloat kTxBarH = 50.0;
+
+// Escala de los medidores: de -60 a 0 dBFS.
+static const float kMeterFloorDb = -60.0f;
 
 @implementation AVMMatrixView {
     avm_matrix _m;
+    avm_meter_reading _srcM[AVM_NUM_SOURCES];
+    avm_meter_reading _dstM[AVM_NUM_DESTS];
     BOOL _txOpen[kNumTx];
     BOOL _rxOpen[kNumRx];
     AVMLane _cols[AVM_NUM_SOURCES + kNumTx];
@@ -107,6 +125,8 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
 {
     if ((self = [super initWithFrame:frame])) {
         memset(&_m, 0, sizeof(_m));
+        memset(_srcM, 0, sizeof(_srcM));
+        memset(_dstM, 0, sizeof(_dstM));
         NSUserDefaults* ud = [NSUserDefaults standardUserDefaults];
         for (int i = 0; i < kNumTx; i++) {
             NSString* k = [NSString stringWithFormat:@"tx_open_%d", i];
@@ -129,6 +149,68 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
 {
     _m = *m;
     [self setNeedsDisplay:YES];
+}
+
+- (void)setMeterSources:(const avm_meter_reading*)src dests:(const avm_meter_reading*)dst
+{
+    if (src) memcpy(_srcM, src, sizeof(_srcM)); else memset(_srcM, 0, sizeof(_srcM));
+    if (dst) memcpy(_dstM, dst, sizeof(_dstM)); else memset(_dstM, 0, sizeof(_dstM));
+    [self setNeedsDisplay:YES];
+}
+
+// Texto de nivel: «—» sin audio, «−∞» silencio digital, si no el pico en dBFS.
+static NSString* LevelText(avm_meter_reading r, BOOL decimals)
+{
+    if (!r.active) return @"—";
+    float db = avm_peak_to_dbfs(r.peak);
+    if (isinf(db)) return @"−∞";
+    if (decimals) return [NSString stringWithFormat:@"%+.1f", db];
+    return [NSString stringWithFormat:@"%.0f", db];
+}
+
+// Barra de nivel en `r` (horizontal o vertical, crece hacia la derecha o hacia arriba).
+- (void)drawMeterBar:(NSRect)r reading:(avm_meter_reading)m vertical:(BOOL)vertical
+{
+    [[[NSColor labelColor] colorWithAlphaComponent:0.10] setFill];
+    NSRectFillUsingOperation(r, NSCompositingOperationSourceOver);
+    if (!m.active) {
+        [[[NSColor labelColor] colorWithAlphaComponent:0.20] setStroke];
+        NSBezierPath* p = [NSBezierPath bezierPathWithRect:NSInsetRect(r, 0.5, 0.5)];
+        CGFloat dash[2] = { 2, 2 };
+        [p setLineDash:dash count:2 phase:0];
+        [p stroke];
+        return;
+    }
+    float db = avm_peak_to_dbfs(m.peak);
+    float frac = isinf(db) ? 0.0f : (db - kMeterFloorDb) / -kMeterFloorDb;
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    // Tramos: verde hasta -18, amarillo hasta -6, naranja hasta 0 dBFS.
+    const float edges[4] = { 0.0f, (-18.0f - kMeterFloorDb) / -kMeterFloorDb, (-6.0f - kMeterFloorDb) / -kMeterFloorDb, 1.0f };
+    NSColor* colors[3] = { [NSColor systemGreenColor], [NSColor systemYellowColor], [NSColor systemOrangeColor] };
+    CGFloat len = vertical ? r.size.height : r.size.width;
+    for (int i = 0; i < 3; i++) {
+        float a = edges[i], b = edges[i + 1] < frac ? edges[i + 1] : frac;
+        if (b <= a) break;
+        NSRect seg = vertical
+            ? NSMakeRect(r.origin.x, NSMaxY(r) - b * len, r.size.width, (b - a) * len)
+            : NSMakeRect(r.origin.x + a * len, r.origin.y, (b - a) * len, r.size.height);
+        [colors[i] setFill];
+        NSRectFill(seg);
+    }
+}
+
+- (void)drawClipLED:(NSRect)r on:(BOOL)on active:(BOOL)active
+{
+    NSBezierPath* p = [NSBezierPath bezierPathWithOvalInRect:r];
+    if (on) {
+        [[NSColor systemRedColor] setFill];
+        [p fill];
+    } else {
+        [[[NSColor labelColor] colorWithAlphaComponent:active ? 0.30 : 0.15] setStroke];
+        p.lineWidth = 1;
+        [p stroke];
+    }
 }
 
 - (void)setEnabled:(BOOL)enabled
@@ -243,9 +325,13 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
     NSDictionary* groupAttr = @{ NSFontAttributeName: [NSFont boldSystemFontOfSize:12], NSForegroundColorAttributeName: [NSColor labelColor] };
     NSDictionary* dimAttr = @{ NSFontAttributeName: [NSFont systemFontOfSize:10], NSForegroundColorAttributeName: [NSColor secondaryLabelColor] };
 
-    // Esquina: títulos de ejes.
-    [@"Transmisores →" drawAtPoint:NSMakePoint(8, kTopH - 36) withAttributes:dimAttr];
-    [@"Receptores ↓" drawAtPoint:NSMakePoint(8, kTopH - 20) withAttributes:dimAttr];
+    // Esquina: títulos de ejes y de las columnas de medidores.
+    [@"Transmisores →" drawAtPoint:NSMakePoint(8, kTopH - kTxMeterH - 20) withAttributes:dimAttr];
+    [@"nivel antes de la matriz →" drawAtPoint:NSMakePoint(kLeftW - 140, kTopH - kTxMeterH / 2 - 6) withAttributes:dimAttr];
+    [@"Receptores ↓" drawAtPoint:NSMakePoint(8, kTopH - 18) withAttributes:dimAttr];
+    [@"nivel entregado" drawAtPoint:NSMakePoint(kRxMeterX, kTopH - 30) withAttributes:dimAttr];
+    [@"dBFS" drawAtPoint:NSMakePoint(kRxDbX + 14, kTopH - 18) withAttributes:dimAttr];
+    [@"SAT" drawAtPoint:NSMakePoint(kRxClipX - 4, kTopH - 18) withAttributes:dimAttr];
 
     // Fondos de cabeceras de grupo, referencia local y carriles bajo el ratón.
     for (int ri = 0; ri < _nrows; ri++) {
@@ -273,7 +359,21 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
             label = TxChannelName(c.channel);
             attr = chanAttr;
         }
-        [self drawVerticalString:label attributes:attr centerX:cx bottomY:kTopH - 4];
+        [self drawVerticalString:label attributes:attr centerX:cx bottomY:kTopH - kTxMeterH - 4];
+
+        // Medidor de la fuente (antes de la matriz): LED, barra vertical y dBFS.
+        if (c.channel >= 0) {
+            avm_meter_reading mr = _srcM[c.channel];
+            CGFloat x0 = kLeftW + ci * kCell;
+            CGFloat top = kTopH - kTxMeterH;
+            [self drawClipLED:NSMakeRect(cx - 4, top + 2, 8, 8) on:mr.clip active:mr.active];
+            [self drawMeterBar:NSMakeRect(cx - 4, top + 13, 8, kTxBarH) reading:mr vertical:YES];
+            NSDictionary* da = @{ NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:8.5 weight:NSFontWeightRegular],
+                                  NSForegroundColorAttributeName: mr.active ? [NSColor labelColor] : [NSColor tertiaryLabelColor] };
+            NSString* t = LevelText(mr, NO);
+            NSSize ts = [t sizeWithAttributes:da];
+            [t drawAtPoint:NSMakePoint(x0 + (kCell - ts.width) / 2.0, top + 13 + kTxBarH + 2) withAttributes:da];
+        }
     }
 
     // Nombres de los receptores.
@@ -285,6 +385,17 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
             [label drawAtPoint:NSMakePoint(6, y) withAttributes:groupAttr];
         } else {
             [RxChannelName(r.channel) drawAtPoint:NSMakePoint(24, y + 1) withAttributes:chanAttr];
+
+            // Medidor del destino (señal entregada, después de la matriz).
+            avm_meter_reading mr = _dstM[r.channel];
+            CGFloat rowY = kTopH + ri * kCell;
+            [self drawMeterBar:NSMakeRect(kRxMeterX, rowY + 6, kRxMeterW, 8) reading:mr vertical:NO];
+            NSDictionary* da = @{ NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular],
+                                  NSForegroundColorAttributeName: mr.active ? [NSColor labelColor] : [NSColor tertiaryLabelColor] };
+            NSString* t = LevelText(mr, YES);
+            NSSize ts = [t sizeWithAttributes:da];
+            [t drawAtPoint:NSMakePoint(kRxDbX + kRxDbW - ts.width, rowY + (kCell - ts.height) / 2.0) withAttributes:da];
+            [self drawClipLED:NSMakeRect(kRxClipX, rowY + 6, 8, 8) on:mr.clip active:mr.active];
             if (r.channel == AVM_DST_LOCAL_REFERENCE) {
                 NSString* badge = @"REFERENCIA LOCAL";
                 NSDictionary* ba = @{ NSFontAttributeName: [NSFont boldSystemFontOfSize:9], NSForegroundColorAttributeName: [NSColor whiteColor] };
@@ -388,11 +499,19 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
     if (ri >= 0) {
         AVMLane r = _rows[ri];
         if (r.channel < 0) return [NSString stringWithFormat:@"Receptor %@: clic para %@", UTF8(kRxGroups[r.group].name), _rxOpen[r.group] ? @"plegar" : @"desplegar"];
-        return DestLongName(r.channel);
+        return [self levelDescription:_dstM[r.channel] name:DestLongName(r.channel) where:@"entregado, después de la matriz"];
     }
     AVMLane c = _cols[ci];
     if (c.channel < 0) return [NSString stringWithFormat:@"Transmisor %@: clic para %@", UTF8(kTxGroups[c.group].name), _txOpen[c.group] ? @"plegar" : @"desplegar"];
-    return SourceLongName(c.channel);
+    return [self levelDescription:_srcM[c.channel] name:SourceLongName(c.channel) where:@"antes de la matriz"];
+}
+
+- (NSString*)levelDescription:(avm_meter_reading)m name:(NSString*)name where:(NSString*)where
+{
+    if (!m.active) return [NSString stringWithFormat:@"%@ — sin audio en este canal", name];
+    float db = avm_peak_to_dbfs(m.peak);
+    NSString* lvl = isinf(db) ? @"silencio (−∞ dBFS)" : [NSString stringWithFormat:@"pico %+.1f dBFS", db];
+    return [NSString stringWithFormat:@"%@ — %@ (%@)%@", name, lvl, where, m.clip ? @" · SATURACIÓN en los últimos 2 s" : @""];
 }
 
 - (void)mouseMoved:(NSEvent*)e
@@ -466,6 +585,7 @@ static const CGFloat kSumW = 40.0;       // columna de aviso de suma, a la derec
 @property (strong) NSLayoutConstraint* scrollH;
 @property (strong) NSStackView* root;
 @property (assign) BOOL listening;
+@property (strong) NSTimer* meterTimer;
 @end
 
 static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
@@ -484,10 +604,40 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     [self buildWindow];
     [self reload];
     [self startListening];
+    [self startMeters];
     [self fitWindow];
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+}
+
+// Medidores: se consulta la propiedad 'metr' 15 veces por segundo, solo con la
+// ventana visible. Es una lectura de propiedad: no abre ni arranca audio.
+- (void)startMeters
+{
+    __weak AVMController* weakSelf = self;
+    self.meterTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 15.0 repeats:YES block:^(NSTimer* t) {
+        (void)t;
+        [weakSelf pollMeters];
+    }];
+    self.meterTimer.tolerance = 0.01;
+}
+
+- (void)pollMeters
+{
+    if (!(self.window.occlusionState & NSWindowOcclusionStateVisible)) return;
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    if (avm_find_device(AVM_DEV_SMAART) == kAudioObjectUnknown || avm_get_meters(s, d) != noErr) {
+        [self.matrixView setMeterSources:NULL dests:NULL];   // todo «—»: nunca valores antiguos
+        return;
+    }
+    [self.matrixView setMeterSources:s dests:d];
+}
+
+- (void)applicationWillTerminate:(NSNotification*)note
+{
+    (void)note;
+    [self.meterTimer invalidate];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)app
@@ -560,8 +710,11 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     self.infoLabel.textColor = [NSColor secondaryLabelColor];
     self.infoLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
-    NSTextField* legend = Label(@"Verde ✓ = conectado · vacía = desconectada · gris × = bloqueada (lazo) · ⊟/⊞ plegar o desplegar grupo · Σ = suma de fuentes. "
-                                @"Solo transporte y enrutamiento: sin ecualización, efectos, análisis ni delay.", 10, NO);
+    NSTextField* legend = [NSTextField wrappingLabelWithString:@"Verde ✓ = conectado · vacía = desconectada · gris × = bloqueada (lazo) · ⊟/⊞ plegar o desplegar grupo · Σ = suma de fuentes.\n"
+                                @"Medidores (pico dBFS): fuentes = antes de la matriz · destinos = señal entregada tras la suma · ● rojo = saturación (2 s) · — = sin audio. "
+                                @"Solo transporte y enrutamiento: sin ecualización, efectos, análisis ni delay."];
+    legend.font = [NSFont systemFontOfSize:10];
+    legend.preferredMaxLayoutWidth = 900;
     legend.textColor = [NSColor tertiaryLabelColor];
 
     self.root = [NSStackView stackViewWithViews:@[ toolbar, self.statusLabel, self.scrollView, self.infoLabel, legend ]];

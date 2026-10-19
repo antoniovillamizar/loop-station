@@ -17,6 +17,7 @@ extern "C" {
 #define AVM_UID_MUSIC     "AVMatrix_Music_UID"
 #define AVM_PROPERTY_MATRIX 'mtrx'
 #define AVM_PROPERTY_RATE_STATE 'rsta'
+#define AVM_PROPERTY_METERS 'metr'
 
 // Estado de la frecuencia según el driver.
 typedef enum { AVM_RATE_HEALTH_OK = 0, AVM_RATE_HEALTH_CHANGING = 1, AVM_RATE_HEALTH_INCONSISTENT = 2 } avm_rate_health_t;
@@ -35,6 +36,10 @@ OSStatus avm_get_rate_health(int* out);
 // Vuelve a aplicar una frecuencia en los tres dispositivos (0 = la actual).
 // Repara el estado inconsistente; requiere que no haya audio activo.
 OSStatus avm_recover_rate(Float64 rate);
+
+// Lee los 34 medidores del driver (18 fuentes antes de la matriz, 16 destinos
+// después). Solo consulta una propiedad: no abre audio ni lo modifica.
+OSStatus avm_get_meters(avm_meter_reading src[AVM_NUM_SOURCES], avm_meter_reading dst[AVM_NUM_DESTS]);
 
 OSStatus avm_get_sample_rate(Float64* out);
 OSStatus avm_set_sample_rate(Float64 rate);

@@ -58,6 +58,7 @@ avmctl test
 
 - macOS puede pedir permiso de **micrófono para Terminal**. Acéptalo; es necesario aunque las entradas sean virtuales.
 - Debe terminar con **«RESULTADO: CORRECTO»**. Al final restaura la matriz.
+- También comprueba los **medidores** del driver con los tres dispositivos abiertos: nivel exacto de cada canal, separación entre canales, una entrada que suma dos fuentes, el indicador de saturación y que todos pasan a inactivo al detener el audio.
 
 ## 6. Prueba en Smaart: enviar y recibir a la vez
 
@@ -82,6 +83,11 @@ Anota lo que observes:
 - [ ] ¿Las Entradas 1-7 quedan en silencio?
 - [ ] ¿Hay cortes o chasquidos?
 - [ ] ¿La matriz de la app se entiende como la de Dante?
+- [ ] Medidores: con el ruido rosa en marcha, ¿**Smaart Salida 1** (arriba) y **Entrada 8 · REFERENCIA LOCAL** (izquierda) marcan el mismo nivel en dBFS que indica Smaart?
+- [ ] ¿Las Entradas 1-7 muestran «—» con LISTENTO cerrado?
+- [ ] Al subir el generador a 0 dBFS, ¿se enciende el LED rojo de saturación en Salida 1 y Entrada 8, y se apaga unos 2 s después de bajarlo?
+- [ ] Al detener el generador en Smaart, ¿los medidores pasan a «—» en menos de medio segundo?
+- [ ] Al cerrar y volver a abrir la app AV Matrix, ¿Smaart sigue recibiendo sin cortes?
 
 ## 7. Al terminar
 

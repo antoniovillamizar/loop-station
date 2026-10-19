@@ -7,6 +7,7 @@
 //   avmctl preset default|direct|clear  (default = medición con referencia local en Entrada 8)
 //   avmctl rate 44100|48000|96000
 //   avmctl recover                     reaplica la frecuencia actual en los tres dispositivos
+//   avmctl meters [--watch]            medidores de nivel (no abre audio)
 //   avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>
 //   avmctl test                        aislamiento, música, regla anti-lazo y retardo de transporte
 //   avmctl test-all                    la misma prueba en las 3 frecuencias x 4 formatos
@@ -186,6 +187,34 @@ static int cmd_recover(void)
     return 1;
 }
 
+static void fmt_level(const avm_meter_reading* r, char* buf, size_t len)
+{
+    if (!r->active) { snprintf(buf, len, "%9s", "inactivo"); return; }
+    float db = avm_peak_to_dbfs(r->peak);
+    if (isinf(db)) snprintf(buf, len, "%9s", "-inf dB");
+    else snprintf(buf, len, "%+6.1f dB", db);
+}
+
+static int cmd_meters(int watch)
+{
+    do {
+        avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+        OSStatus err = avm_get_meters(s, d);
+        if (err) { print_err("leer medidores", err); return 1; }
+        if (watch) printf("\033[H\033[2J");
+        printf("%-34s %-12s     %-38s %-12s\n", "FUENTE (antes de la matriz)", "pico dBFS", "DESTINO (después de la matriz)", "pico dBFS");
+        for (int i = 0; i < AVM_NUM_SOURCES || i < AVM_NUM_DESTS; i++) {
+            char sn[64] = "", sl[32] = "", dn[64] = "", dl[32] = "";
+            const char *sc = "", *dc = "";
+            if (i < AVM_NUM_SOURCES) { avm_source_name(i, sn, sizeof(sn)); fmt_level(&s[i], sl, sizeof(sl)); sc = s[i].clip ? " SAT" : ""; }
+            if (i < AVM_NUM_DESTS)   { avm_dest_name(i, dn, sizeof(dn));   fmt_level(&d[i], dl, sizeof(dl)); dc = d[i].clip ? " SAT" : ""; }
+            printf("%-34s %-12s%-4s %-38s %-12s%s\n", sn, sl, sc, dn, dl, dc);
+        }
+        if (watch) { fflush(stdout); usleep(200000); }
+    } while (watch);
+    return 0;
+}
+
 static int parse_format(const char* s)
 {
     if (!strcasecmp(s, "f32")) return AVM_FMT_FLOAT32;
@@ -251,9 +280,13 @@ static test_ctx g_t;
 static float expected_in(int dev, int c)
 {
     if (dev == T_LINK) return val_smaart(c);           // smaart.out.N -> listento.in.N
-    if (c < 6) return val_link(c);                     // listento.out.1-6 -> smaart.in.1-6
+    if (c == 0) return val_link(0) + val_link(1);      // suma: listento.out.1 + .2 -> smaart.in.1
+    if (c < 6) return val_link(c);                     // listento.out.2-6 -> smaart.in.2-6
     return c == 6 ? kMusicL : kMusicR;                 // music.L/R -> smaart.in.7/8
 }
+
+// Valores de la fase de saturación (modo 2), en Smaart Salidas 1-3.
+static const float kClipOut[3] = { 1.0f, 0.6f, 0.6f };
 
 static void classify_input(int dev, const AudioBufferList* in, const AudioTimeStamp* t)
 {
@@ -299,6 +332,10 @@ static void fill_output(int dev, AudioBufferList* out, const AudioTimeStamp* t)
                 p[f * nch + c] = dev == T_SMAART ? val_smaart((int)c)
                                : dev == T_LINK   ? val_link((int)c)
                                : (c == 0 ? kMusicL : kMusicR);
+    } else if (g_t.mode == 2) {
+        if (dev == T_SMAART)
+            for (UInt32 f = 0; f < frames; f++)
+                for (UInt32 c = 0; c < nch && c < 3; c++) p[f * nch + c] = kClipOut[c];
     } else if (dev == T_SMAART) {
         if (g_t.first_out < 0) g_t.first_out = t->mSampleTime;
         Float64 target = g_t.first_out + g_t.rate;  // impulso 1 s después de arrancar
@@ -316,12 +353,14 @@ static OSStatus io_proc(AudioObjectID dev, const AudioTimeStamp* now, const Audi
 {
     (void)dev; (void)now;
     int which = (int)(intptr_t)client;
-    if (which != T_MUSIC) classify_input(which, in, inTime);
+    if (which != T_MUSIC && g_t.mode != 2) classify_input(which, in, inTime);
     fill_output(which, out, outTime);
     return noErr;
 }
 
-static int run_devices(double seconds)
+// Abre los tres dispositivos `seconds` segundos. Si `during` no es NULL, se
+// llama justo antes de detenerlos (con el audio aún en marcha).
+static int run_devices(double seconds, void (*during)(void))
 {
     AudioObjectID devs[3] = { avm_find_device(AVM_DEV_SMAART), avm_find_device(AVM_DEV_LISTENTO), avm_find_device(AVM_DEV_MUSIC) };
     AudioDeviceIOProcID ids[3] = { 0 };
@@ -335,6 +374,7 @@ static int run_devices(double seconds)
         if (err) { print_err("arrancar dispositivo", err); ok = 0; }
     }
     if (ok) usleep((useconds_t)(seconds * 1e6));
+    if (ok && during) during();
     for (int i = 0; i < 3; i++) {
         if (ids[i]) {
             AudioDeviceStop(devs[i], ids[i]);
@@ -351,6 +391,70 @@ static void reset_ctx(int mode, Float64 rate)
     g_t.rate = rate;
     for (int i = 0; i < 3; i++) g_t.first_in[i] = -1;
     g_t.first_out = -1;
+}
+
+// --- Comprobación de los medidores del driver (propiedad 'metr') -----------
+
+static int g_meter_pass = 1;
+static int g_meter_verbose = 0;
+
+static void meter_expect(const char* what, const avm_meter_reading* r, float peak, int clip)
+{
+    int good = r->active && fabsf(r->peak - peak) <= 1e-6f && (clip < 0 || (r->clip != 0) == (clip != 0));
+    if (!good) g_meter_pass = 0;
+    if (g_meter_verbose || !good)
+        printf("  %-6s medidor %-38s %s %+7.2f dBFS (esperado %+7.2f)%s\n", good ? "OK" : "FALLO", what,
+               r->active ? "activo" : "INACTIVO", avm_peak_to_dbfs(r->peak), avm_peak_to_dbfs(peak),
+               r->clip ? " SAT" : "");
+}
+
+static void meters_during_isolation(void)
+{
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    if (avm_get_meters(s, d) != noErr) { printf("  FALLO  no se pudieron leer los medidores\n"); g_meter_pass = 0; return; }
+    char name[64];
+    for (int i = 0; i < 8; i++) {
+        avm_source_name(AVM_SRC_SMAART_BASE + i, name, sizeof(name)); meter_expect(name, &s[AVM_SRC_SMAART_BASE + i], val_smaart(i), 0);
+        avm_source_name(AVM_SRC_LINK_BASE + i, name, sizeof(name));   meter_expect(name, &s[AVM_SRC_LINK_BASE + i], fabsf(val_link(i)), 0);
+    }
+    avm_source_name(AVM_SRC_MUSIC_BASE, name, sizeof(name));     meter_expect(name, &s[AVM_SRC_MUSIC_BASE], kMusicL, 0);
+    avm_source_name(AVM_SRC_MUSIC_BASE + 1, name, sizeof(name)); meter_expect(name, &s[AVM_SRC_MUSIC_BASE + 1], fabsf(kMusicR), 0);
+    for (int i = 0; i < 8; i++) {
+        avm_dest_name(AVM_DST_SMAART_BASE + i, name, sizeof(name)); meter_expect(name, &d[AVM_DST_SMAART_BASE + i], fabsf(expected_in(T_SMAART, i)), 0);
+        avm_dest_name(AVM_DST_LINK_BASE + i, name, sizeof(name));   meter_expect(name, &d[AVM_DST_LINK_BASE + i], fabsf(expected_in(T_LINK, i)), 0);
+    }
+}
+
+static void meters_during_clip(void)
+{
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    if (avm_get_meters(s, d) != noErr) { printf("  FALLO  no se pudieron leer los medidores\n"); g_meter_pass = 0; return; }
+    // Con formato físico entero, 1,0 llega como el código máximo (p. ej. 32767/32768).
+    AudioStreamBasicDescription asbd;
+    float full = 1.0f;
+    if (avm_get_physical_format(AVM_DEV_SMAART, false, &asbd) == noErr) {
+        int f = avm_format_from_asbd(&asbd);
+        if (f >= 0) full = avm_format_clip_level((avm_format)f);
+    }
+    meter_expect("Smaart Salida 1 a 0 dBFS (SAT)", &s[AVM_SRC_SMAART_BASE + 0], full, 1);
+    meter_expect("Smaart Salida 2 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 1], kClipOut[1], 0);
+    meter_expect("Smaart Salida 3 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 2], kClipOut[2], 0);
+    meter_expect("LISTENTO Envío 1 = Salida 1 (SAT)", &d[AVM_DST_LINK_BASE + 0], full, 1);
+    meter_expect("LISTENTO Envío 2 = 0,6 + 0,6 (SAT)", &d[AVM_DST_LINK_BASE + 1], kClipOut[1] + kClipOut[2], 1);
+    meter_expect("LISTENTO Envío 3 sin ruta (silencio)", &d[AVM_DST_LINK_BASE + 2], 0.0f, 0);
+}
+
+// Tras detener el audio, ningún medidor puede seguir mostrando un valor.
+static void meters_after_stop(int verbose)
+{
+    usleep(400000);
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    if (avm_get_meters(s, d) != noErr) { printf("  FALLO  no se pudieron leer los medidores\n"); g_meter_pass = 0; return; }
+    int stale = 0;
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) if (s[i].active || s[i].peak != 0) stale++;
+    for (int i = 0; i < AVM_NUM_DESTS; i++) if (d[i].active || d[i].peak != 0) stale++;
+    if (stale) { g_meter_pass = 0; printf("  FALLO  %d medidores siguen mostrando nivel tras detener el audio\n", stale); }
+    else if (verbose) printf("  OK     al detener el audio, los 34 medidores pasan a inactivo\n");
 }
 
 // Devuelve 1 si todo pasó.
@@ -375,11 +479,14 @@ static int run_test_once(int verbose)
     for (int i = 0; i < 6; i++) m.cell[AVM_DST_SMAART_BASE + i][AVM_SRC_LINK_BASE + i] = 1;
     m.cell[AVM_DST_SMAART_BASE + 6][AVM_SRC_MUSIC_BASE + 0] = 1;
     m.cell[AVM_DST_SMAART_BASE + 7][AVM_SRC_MUSIC_BASE + 1] = 1;
+    m.cell[AVM_DST_SMAART_BASE + 0][AVM_SRC_LINK_BASE + 1] = 1;   // suma en smaart.in.1
     // listento.out.7 y .8 quedan sin ruta: no deben aparecer en ningún destino.
     if ((err = avm_set_matrix(&m))) { print_err("escribir matriz de prueba", err); return 0; }
 
     reset_ctx(0, rate);
-    if (!run_devices(3.5)) return 0;
+    g_meter_pass = 1;
+    g_meter_verbose = verbose;
+    if (!run_devices(3.5, meters_during_isolation)) return 0;
     const char* dn[2] = { "Smaart entrada", "LISTENTO envío" };
     for (int di = 0; di < 2; di++)
         for (int c = 0; c < 8; c++) {
@@ -391,13 +498,26 @@ static int run_test_once(int verbose)
                        good ? "OK" : "FALLO", dn[di], c + 1, ok, z, w);
         }
 
+    meters_after_stop(verbose);
+
+    // 2b) Medidores con saturación: fuente a 0 dBFS y destino que suma 0,6 + 0,6.
+    avm_matrix_clear(&m);
+    m.cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
+    m.cell[AVM_DST_LINK_BASE + 1][AVM_SRC_SMAART_BASE + 1] = 1;
+    m.cell[AVM_DST_LINK_BASE + 1][AVM_SRC_SMAART_BASE + 2] = 1;
+    if ((err = avm_set_matrix(&m))) { print_err("escribir matriz de prueba", err); return 0; }
+    reset_ctx(2, rate);
+    if (!run_devices(1.5, meters_during_clip)) return 0;
+    meters_after_stop(verbose);
+    if (!g_meter_pass) pass = 0;
+
     // 3) Retardo de transporte con un impulso (informativo; no es un objetivo de latencia).
     avm_matrix_clear(&m);
     m.cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
     m.cell[AVM_DST_SMAART_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
     if ((err = avm_set_matrix(&m))) { print_err("escribir matriz de prueba", err); return 0; }
     reset_ctx(1, rate);
-    if (!run_devices(2.5)) return 0;
+    if (!run_devices(2.5, NULL)) return 0;
     if (atomic_load(&g_t.got_link) && atomic_load(&g_t.got_smaart)) {
         double dl = g_t.t_link - g_t.impulse_time, ds = g_t.t_smaart - g_t.impulse_time;
         printf("  INFO   retardo Smaart salida 1 -> LISTENTO envío 1: %.0f frames (%.2f ms)\n", dl, 1000.0 * dl / rate);
@@ -476,6 +596,7 @@ static void usage(void)
            "  avmctl preset default|direct|clear   (default = medición, Entrada 8 = referencia local)\n"
            "  avmctl rate 44100|48000|96000\n"
            "  avmctl recover\n"
+           "  avmctl meters [--watch]\n"
            "  avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>\n"
            "  avmctl test\n"
            "  avmctl test-all\n\n"
@@ -500,6 +621,7 @@ int main(int argc, char** argv)
     if (!strcmp(c, "preset") && argc == 3) return cmd_preset(argv[2]);
     if (!strcmp(c, "rate") && argc == 3) return cmd_rate(argv[2]);
     if (!strcmp(c, "recover")) return cmd_recover();
+    if (!strcmp(c, "meters")) return cmd_meters(argc == 3 && !strcmp(argv[2], "--watch"));
     if (!strcmp(c, "format") && argc == 5) return cmd_format(argv[2], argv[3], argv[4]);
     if (!strcmp(c, "test")) return cmd_test(0);
     if (!strcmp(c, "test-all")) return cmd_test(1);

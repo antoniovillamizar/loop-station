@@ -14,6 +14,7 @@
 
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -93,6 +94,37 @@ typedef struct {
     _Atomic uint64_t    words[AVM_MATRIX_WORDS];
 } avm_matrix_slot;
 
+// --- Medidores de nivel ------------------------------------------------------
+// Solo observan: leen los mismos valores float que el motor ya calcula y nunca
+// modifican, retrasan ni copian las muestras transportadas.
+//   * Fuente: valor de cada muestra que la aplicación envía (antes de la matriz;
+//     incluye la mezcla que hace macOS si varias apps usan la misma salida).
+//   * Destino: valor sumado por la matriz que se entrega a la aplicación
+//     (después del enrutamiento y de la suma; antes de recortar a entero).
+// Cada medidor tiene UN escritor (el hilo de IO de su dispositivo) y se
+// actualiza sin esperas: solo cargas y almacenamientos atómicos.
+// El pico se agrupa en ventanas de AVM_METER_EPOCH_NS; la lectura devuelve el
+// máximo de la ventana actual y la anterior, sin borrar nada, así varios
+// lectores (app, avmctl) no se roban los picos. Si no llegan bloques nuevos
+// durante AVM_METER_ACTIVE_NS, el medidor pasa a inactivo y su pico a 0.
+#define AVM_METER_EPOCH_NS   50000000ull     // 50 ms
+#define AVM_METER_ACTIVE_NS  250000000ull    // 250 ms sin bloques = inactivo
+#define AVM_METER_CLIP_HOLD_NS 2000000000ull // el indicador rojo se mantiene 2 s
+
+typedef struct {
+    _Atomic uint64_t    epoch;
+    _Atomic float       cur_peak;       // pico de la ventana `epoch`
+    _Atomic float       prev_peak;      // pico de la ventana anterior
+    _Atomic uint64_t    last_update_ns; // 0 = nunca
+    _Atomic uint64_t    last_clip_ns;   // 0 = nunca
+} avm_meter;
+
+typedef struct {
+    float   peak;       // pico lineal (1.0 = 0 dBFS); 0 si inactivo
+    bool    active;     // llegaron bloques en los últimos AVM_METER_ACTIVE_NS
+    bool    clip;       // saturación en los últimos AVM_METER_CLIP_HOLD_NS
+} avm_meter_reading;
+
 typedef struct {
     // Las muestras son atómicas con orden relajado: en arm64 y x86_64 compilan
     // a cargas y almacenamientos normales, y evitan carreras de datos (UB en C11).
@@ -111,6 +143,9 @@ typedef struct {
     // hilo de IO del dispositivo correspondiente (un lector por grupo).
     avm_matrix          reader_cache[AVM_DST_GROUP_COUNT];
     _Atomic uint64_t    stale_matrix_reads;                // diagnóstico: lecturas con copia anterior
+
+    avm_meter           src_meters[AVM_NUM_SOURCES];
+    avm_meter           dst_meters[AVM_NUM_DESTS];
 } avm_engine;
 
 // --- Descripción de grupos -------------------------------------------------
@@ -144,6 +179,37 @@ void avm_engine_set_matrix(avm_engine* e, const avm_matrix* m);
 // Lectura acotada y sin espera. Devuelve false (y no modifica *out) si tras
 // AVM_MATRIX_READ_ATTEMPTS intentos no obtuvo una copia coherente.
 bool avm_engine_try_get_matrix(avm_engine* e, avm_matrix* out);
+
+// Variantes con medición: now_ns es la hora monotónica en nanosegundos (> 0).
+// Hacen exactamente lo mismo que avm_engine_write/avm_engine_read y además
+// actualizan los medidores de las fuentes o destinos del grupo.
+void avm_engine_write_metered(avm_engine* e, avm_src_group g, int64_t sample_time,
+                              uint32_t frames, const void* interleaved, avm_format fmt,
+                              uint32_t channels, uint64_t now_ns);
+bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time,
+                             uint32_t frames, void* interleaved, avm_format fmt,
+                             uint32_t channels, uint64_t now_ns);
+
+// Lectura de todos los medidores (no modifica nada; segura desde cualquier hilo).
+void avm_engine_meter_snapshot(avm_engine* e, uint64_t now_ns,
+                               avm_meter_reading src[AVM_NUM_SOURCES],
+                               avm_meter_reading dst[AVM_NUM_DESTS]);
+
+// Serialización de los medidores para la propiedad 'metr' del driver.
+// Formato: cabecera 16 bytes ('AVM1', n fuentes, n destinos, 0) y 8 bytes por
+// medidor (float pico, uint8 activo, uint8 saturación, uint16 0), fuentes y luego destinos.
+#define AVM_METERS_BLOB_SIZE (16u + 8u * (AVM_NUM_SOURCES + AVM_NUM_DESTS))
+void avm_meters_pack(const avm_meter_reading src[AVM_NUM_SOURCES],
+                     const avm_meter_reading dst[AVM_NUM_DESTS], uint8_t out[AVM_METERS_BLOB_SIZE]);
+bool avm_meters_unpack(const uint8_t* blob, size_t len,
+                       avm_meter_reading src[AVM_NUM_SOURCES], avm_meter_reading dst[AVM_NUM_DESTS]);
+
+// Nivel de saturación de la entrada de una fuente según su formato físico:
+// el valor de escala completa que ese formato puede representar.
+float avm_format_clip_level(avm_format fmt);
+
+// Pico lineal -> dBFS (20·log10). Devuelve -INFINITY para 0 (silencio digital).
+float avm_peak_to_dbfs(float peak);
 
 // Escribe audio intercalado de una aplicación en las fuentes de un grupo.
 // sample_time es la posición en la línea de tiempo común del driver.
