@@ -50,6 +50,22 @@ clang $ARCHS -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmac
     -o "$APP/Contents/MacOS/AVMatrix" \
     App/AVMatrixApp.m Client/avm_client.c Driver/src/avm_core.c \
     -framework Cocoa -framework CoreAudio -framework CoreFoundation
+# Icono personalizado (antes de firmar: queda sellado en la firma del bundle).
+set +e
+bash scripts/resolve_icon.sh "$APP"
+icon_rc=$?
+set -e
+if [ $icon_rc -eq 3 ]; then
+    if [ -n "${AVM_ALLOW_GENERIC_ICON:-}" ]; then
+        echo "Aviso: sin AVMatrix.icns; la app tendrá el icono genérico (AVM_ALLOW_GENERIC_ICON)."
+    else
+        echo "ERROR: no se encontró el icono AVMatrix.icns." >&2
+        echo "Cópielo a App/Resources/AVMatrix.icns (o defina AVM_ICON_SOURCE=<archivo>) y vuelva a compilar." >&2
+        exit 1
+    fi
+elif [ $icon_rc -ne 0 ]; then
+    exit 1
+fi
 codesign --force --sign "${AVM_SIGN_IDENTITY:--}" --timestamp=none "$APP"
 
 echo "== Pruebas (núcleo, frecuencia, instalador) =="
@@ -68,6 +84,7 @@ codesign --verify --strict --deep --verbose=2 "$DRV"
 codesign --verify --strict --deep --verbose=2 "$APP"
 codesign --verify --strict --verbose=2 "$OUT/avmctl"
 plutil -lint "$DRV/Contents/Info.plist" "$APP/Contents/Info.plist"
+if [ -f "$APP/Contents/Resources/AVMatrix.icns" ]; then echo "Icono incluido: $APP/Contents/Resources/AVMatrix.icns"; fi
 codesign -dvv "$DRV" 2>&1 | grep -E "^(Signature|Authority|TeamIdentifier)=" || true
 echo
 echo "Listo: $OUT"

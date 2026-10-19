@@ -391,6 +391,249 @@ static void test_concurrency(void)
     free(x.e);
 }
 
+// --- Revisión 6 -------------------------------------------------------------
+
+// Escribe en Smaart Salida 1 un bloque de `code` en el formato entero `fmt` y lo
+// entrega por LISTENTO Envío 1 en el mismo formato. Devuelve la muestra entregada.
+static int64_t roundtrip_int(avm_engine* e, avm_format fmt, int64_t code, int64_t t, uint64_t now,
+                             avm_meter_reading* s, avm_meter_reading* d)
+{
+    uint8_t in[BLOCK * 8 * 4], out[BLOCK * 8 * 4];
+    uint32_t bps = avm_format_bytes_per_sample(fmt);
+    memset(in, 0, sizeof(in));
+    for (int f = 0; f < BLOCK; f++) {
+        uint8_t* p = in + (size_t)f * 8 * bps;  // canal 0
+        if (fmt == AVM_FMT_SINT16) { int16_t v = (int16_t)code; memcpy(p, &v, 2); }
+        else if (fmt == AVM_FMT_SINT32) { int32_t v = (int32_t)code; memcpy(p, &v, 4); }
+        else { uint32_t u = (uint32_t)(int32_t)code; p[0] = (uint8_t)u; p[1] = (uint8_t)(u >> 8); p[2] = (uint8_t)(u >> 16); }
+    }
+    avm_engine_write_metered(e, AVM_SRC_GROUP_SMAART, t, BLOCK, in, fmt, 8, now);
+    avm_engine_read_metered(e, AVM_DST_GROUP_LINK, t, BLOCK, out, fmt, 8, now);
+    avm_engine_meter_snapshot(e, now, s, d);
+    const uint8_t* q = out + (size_t)(BLOCK / 2) * 8 * bps;
+    if (fmt == AVM_FMT_SINT16) { int16_t v; memcpy(&v, q, 2); return v; }
+    if (fmt == AVM_FMT_SINT32) { int32_t v; memcpy(&v, q, 4); return v; }
+    int32_t v = (int32_t)((uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16));
+    if (v & 0x800000) v -= 0x1000000;
+    return v;
+}
+
+static void test_int_destination_clip(void)
+{
+    struct { avm_format fmt; const char* name; int64_t max, below, min; } cases[] = {
+        { AVM_FMT_SINT16, "SInt16", 32767, 32766, -32768 },
+        { AVM_FMT_SINT24, "SInt24", 8388607, 8388606, -8388608 },
+        // En SInt32 el transporte float no distingue 2^31-1 de 2^31-2: el código
+        // inmediatamente por debajo de escala completa en float es 2^31 - 2^8.
+        { AVM_FMT_SINT32, "SInt32", 2147483647, 2147483392, -2147483647 - 1 },
+    };
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        avm_engine* e = new_engine();   // preset de medición: Smaart Salida 1 -> LISTENTO Envío 1
+        avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+        uint64_t now = 200 * SEC;
+        int64_t got = roundtrip_int(e, cases[k].fmt, cases[k].max, 0, now, s, d);
+        CHECK(got == cases[k].max, "%s: se entrega el código máximo (%lld)", cases[k].name, (long long)got);
+        CHECK(s[0].clip, "%s: escala completa satura en la fuente", cases[k].name);
+        CHECK(d[AVM_DST_LINK_BASE].clip, "%s: el destino que entrega escala completa también satura", cases[k].name);
+        CHECK(d[AVM_DST_LINK_BASE].peak == s[0].peak, "%s: mismo pico en fuente y destino (%.9f / %.9f)",
+              cases[k].name, s[0].peak, d[AVM_DST_LINK_BASE].peak);
+        free(e);
+
+        e = new_engine();
+        got = roundtrip_int(e, cases[k].fmt, cases[k].below, 0, now, s, d);
+        CHECK(got == cases[k].below, "%s: código bajo escala completa intacto", cases[k].name);
+        CHECK(!s[0].clip && !d[AVM_DST_LINK_BASE].clip, "%s: por debajo de escala completa no satura (fuente %d, destino %d)",
+              cases[k].name, s[0].clip, d[AVM_DST_LINK_BASE].clip);
+        free(e);
+
+        e = new_engine();
+        got = roundtrip_int(e, cases[k].fmt, cases[k].min, 0, now, s, d);
+        CHECK(got == cases[k].min && s[0].clip && d[AVM_DST_LINK_BASE].clip, "%s: escala completa negativa satura en ambos", cases[k].name);
+        free(e);
+    }
+
+    // Fuente float por debajo de 0 dBFS entregada como SInt16: la muestra entregada
+    // es 32767, así que el destino indica saturación; entregada como Float32, no.
+    avm_engine* e = new_engine();
+    uint64_t now = 210 * SEC;
+    float sm[8] = { 0.99996f, 0, 0, 0, 0, 0, 0, 0 };
+    write_const(e, AVM_SRC_GROUP_SMAART, 0, 2, sm, &now);
+    int16_t o16[BLOCK * 8];
+    avm_engine_read_metered(e, AVM_DST_GROUP_LINK, 0, BLOCK, o16, AVM_FMT_SINT16, 8, now);
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    avm_engine_meter_snapshot(e, now, s, d);
+    CHECK(!s[0].clip, "fuente float a 0,99996: sin saturación");
+    CHECK(o16[0] == 32767 && d[AVM_DST_LINK_BASE].clip, "entregada en SInt16 como 32767: el destino indica saturación");
+    free(e);
+    e = new_engine();
+    now = 220 * SEC;
+    write_const(e, AVM_SRC_GROUP_SMAART, 0, 2, sm, &now);
+    float of[BLOCK * 8];
+    avm_engine_read_metered(e, AVM_DST_GROUP_LINK, 0, BLOCK, of, AVM_FMT_FLOAT32, 8, now);
+    avm_engine_meter_snapshot(e, now, s, d);
+    CHECK(!d[AVM_DST_LINK_BASE].clip && of[0] == 0.99996f, "entregada en Float32: sin saturación y valor intacto");
+    free(e);
+
+    // La suma que excede se sigue detectando en todos los formatos.
+    const avm_format all[] = { AVM_FMT_FLOAT32, AVM_FMT_SINT32, AVM_FMT_SINT24, AVM_FMT_SINT16 };
+    for (int f = 0; f < 4; f++) {
+        e = new_engine();
+        avm_matrix m;
+        avm_matrix_clear(&m);
+        m.cell[AVM_DST_LINK_BASE][AVM_SRC_SMAART_BASE] = 1;
+        m.cell[AVM_DST_LINK_BASE][AVM_SRC_SMAART_BASE + 1] = 1;
+        avm_engine_set_matrix(e, &m);
+        now = 230 * SEC;
+        float two[8] = { 0.6f, 0.6f, 0, 0, 0, 0, 0, 0 };
+        write_const(e, AVM_SRC_GROUP_SMAART, 0, 2, two, &now);
+        uint8_t out[BLOCK * 8 * 4];
+        avm_engine_read_metered(e, AVM_DST_GROUP_LINK, 0, BLOCK, out, all[f], 8, now);
+        avm_engine_meter_snapshot(e, now, s, d);
+        CHECK(d[AVM_DST_LINK_BASE].clip && !s[0].clip && !s[1].clip, "formato %d: la suma 0,6 + 0,6 satura el destino, no las fuentes", f);
+        free(e);
+    }
+}
+
+static void test_quantize(void)
+{
+    CHECK(avm_quantize(0.6f, AVM_FMT_SINT16) == 19661.0f / 32768.0f, "0,6 en SInt16 = 19661/32768 (%.9f)", avm_quantize(0.6f, AVM_FMT_SINT16));
+    CHECK(fabsf(avm_quantize(0.6f, AVM_FMT_SINT16) - 0.600006104f) < 1e-9f, "≈ 0,600006104 (valor observado por Codex)");
+    CHECK(avm_quantize(1.0f, AVM_FMT_SINT16) == 32767.0f / 32768.0f, "1,0 en SInt16 = 32767/32768");
+    CHECK(avm_quantize(0.6f, AVM_FMT_FLOAT32) == 0.6f, "Float32 no cuantiza");
+    CHECK(avm_quantize(-1.0f, AVM_FMT_SINT24) == -1.0f, "-1,0 en SInt24 exacto");
+    float q = avm_quantize(0.6f, AVM_FMT_SINT16);
+    CHECK(fabsf((q + q) - 1.200012207f) < 1e-7f, "0,6 + 0,6 cuantizados en SInt16 ≈ 1,200012207");
+}
+
+static void test_reset_clears_meters(void)
+{
+    avm_engine* e = new_engine();
+    uint64_t now = 300 * SEC;
+    float loud[8] = { 1.0f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+    int64_t t = write_const(e, AVM_SRC_GROUP_SMAART, 0, 4, loud, &now);
+    float out[BLOCK * 8];
+    read_group(e, AVM_DST_GROUP_LINK, t - BLOCK, now, out);
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    avm_engine_meter_snapshot(e, now, s, d);
+    CHECK(s[0].active && s[0].clip && d[AVM_DST_LINK_BASE].active, "antes del reinicio: activos y saturados");
+
+    avm_engine_reset(e);   // nueva sesión (StartIO tras no haber IO)
+    avm_engine_meter_snapshot(e, now + 10 * MS, s, d);  // la consulta de Codex: 10 ms después
+    int clean = 1;
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) if (s[i].active || s[i].peak != 0 || s[i].clip) clean = 0;
+    for (int i = 0; i < AVM_NUM_DESTS; i++) if (d[i].active || d[i].peak != 0 || d[i].clip) clean = 0;
+    CHECK(clean, "10 ms después del reinicio: los 34 medidores inactivos, sin pico ni saturación");
+
+    // La nueva sesión mide solo lo nuevo.
+    float quiet[8] = { 0.25f, 0, 0, 0, 0, 0, 0, 0 };
+    now += 20 * MS;
+    write_const(e, AVM_SRC_GROUP_SMAART, 0, 1, quiet, &now);
+    avm_engine_meter_snapshot(e, now, s, d);
+    CHECK(s[0].active && s[0].peak == 0.25f && !s[0].clip, "nueva sesión: 0,25 sin saturación heredada");
+    CHECK(!d[AVM_DST_LINK_BASE].active, "el destino aún no leído sigue inactivo");
+    free(e);
+}
+
+typedef struct { avm_engine* e; _Atomic int stop; _Atomic long bad; _Atomic long reads; } reset_ctx;
+
+static void* reset_reader(void* p)
+{
+    reset_ctx* x = (reset_ctx*)p;
+    avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+    while (!atomic_load(&x->stop)) {
+        avm_engine_meter_snapshot(x->e, 400 * SEC, s, d);
+        for (int i = 0; i < AVM_NUM_SOURCES; i++) {
+            float v = s[i].peak;
+            if (!(v == 0.0f || v == 0.25f || v == 0.5f)) atomic_fetch_add(&x->bad, 1);
+            if (!s[i].active && v != 0.0f) atomic_fetch_add(&x->bad, 1);
+        }
+        atomic_fetch_add(&x->reads, 1);
+    }
+    return NULL;
+}
+
+static void test_reset_concurrent_readers(void)
+{
+    reset_ctx x;
+    x.e = new_engine();
+    atomic_init(&x.stop, 0);
+    atomic_init(&x.bad, 0);
+    atomic_init(&x.reads, 0);
+    pthread_t r1, r2;
+    pthread_create(&r1, NULL, reset_reader, &x);
+    pthread_create(&r2, NULL, reset_reader, &x);
+    long dirty_after_reset = 0;
+    float buf[BLOCK * 8];
+    for (int i = 0; i < 300; i++) {
+        float v = (i & 1) ? 0.25f : 0.5f;
+        for (int k = 0; k < BLOCK * 8; k++) buf[k] = v;
+        avm_engine_write_metered(x.e, AVM_SRC_GROUP_SMAART, 0, BLOCK, buf, AVM_FMT_FLOAT32, 8, 400 * SEC);
+        avm_engine_reset(x.e);
+        avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+        avm_engine_meter_snapshot(x.e, 400 * SEC, s, d);
+        for (int c = 0; c < AVM_NUM_SOURCES; c++) if (s[c].active || s[c].peak != 0) dirty_after_reset++;
+    }
+    atomic_store(&x.stop, 1);
+    pthread_join(r1, NULL);
+    pthread_join(r2, NULL);
+    CHECK(dirty_after_reset == 0, "tras cada reinicio, ninguna lectura conserva la sesión anterior (%ld)", dirty_after_reset);
+    CHECK(atomic_load(&x.bad) == 0, "lectores concurrentes durante los reinicios: sin valores imposibles (%ld)", atomic_load(&x.bad));
+    printf("  reinicios con lectores concurrentes: %ld lecturas\n", atomic_load(&x.reads));
+    free(x.e);
+}
+
+// Reproduce la fase de saturación de `avmctl test` en las 16 combinaciones de
+// formato físico (salidas de Smaart × entradas de LISTENTO): la app envía float,
+// el HAL lo convierte al formato de salida y el driver lo lee. Los valores
+// esperados se calculan con avm_quantize igual que avmctl, con tolerancia 1e-6.
+static void test_selftest_clip_expectations(void)
+{
+    const avm_format fmts[] = { AVM_FMT_FLOAT32, AVM_FMT_SINT32, AVM_FMT_SINT24, AVM_FMT_SINT16 };
+    const float sent[3] = { 1.0f, 0.6f, 0.6f };
+    int bad = 0, combos = 0;
+    for (int a = 0; a < 4; a++)
+        for (int b = 0; b < 4; b++) {
+            avm_format sf = fmts[a], df = fmts[b];
+            avm_engine* e = new_engine();
+            avm_matrix m;
+            avm_matrix_clear(&m);
+            m.cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
+            m.cell[AVM_DST_LINK_BASE + 1][AVM_SRC_SMAART_BASE + 1] = 1;
+            m.cell[AVM_DST_LINK_BASE + 1][AVM_SRC_SMAART_BASE + 2] = 1;
+            avm_engine_set_matrix(e, &m);
+            uint32_t bps = avm_format_bytes_per_sample(sf);
+            uint8_t in[BLOCK * 8 * 4], out[BLOCK * 8 * 4];
+            memset(in, 0, sizeof(in));
+            for (int f = 0; f < BLOCK; f++)
+                for (int c = 0; c < 3; c++) avm_float_to_sample(sent[c], in + ((size_t)f * 8 + c) * bps, sf);  // «HAL»
+            uint64_t now = 500 * SEC;
+            avm_engine_write_metered(e, AVM_SRC_GROUP_SMAART, 0, BLOCK, in, sf, 8, now);
+            avm_engine_read_metered(e, AVM_DST_GROUP_LINK, 0, BLOCK, out, df, 8, now);
+            avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
+            avm_engine_meter_snapshot(e, now, s, d);
+            float q0 = avm_quantize(sent[0], sf), q1 = avm_quantize(sent[1], sf), q2 = avm_quantize(sent[2], sf);
+            float dclip = avm_format_delivery_clip_level(df);
+            struct { const avm_meter_reading* r; float peak; int clip; } exp[6] = {
+                { &s[0], q0, 1 }, { &s[1], q1, 0 }, { &s[2], q2, 0 },
+                { &d[AVM_DST_LINK_BASE], q0, q0 >= dclip }, { &d[AVM_DST_LINK_BASE + 1], q1 + q2, 1 },
+                { &d[AVM_DST_LINK_BASE + 2], 0.0f, 0 },
+            };
+            for (int k = 0; k < 6; k++)
+                if (!exp[k].r->active || fabsf(exp[k].r->peak - exp[k].peak) > 1e-6f || (exp[k].r->clip != 0) != (exp[k].clip != 0)) {
+                    bad++;
+                    printf("  combinación salida %d / entrada %d, medidor %d: pico %.9f (esperado %.9f), SAT %d (esperado %d)\n",
+                           a, b, k, exp[k].r->peak, exp[k].peak, exp[k].r->clip, exp[k].clip);
+                }
+            combos++;
+            free(e);
+        }
+    CHECK(bad == 0, "fase de saturación de avmctl: valores exactos en las %d combinaciones de formato", combos);
+    // El caso de Codex: con SInt16 la prueba antigua rechazaba 0,600006104 y 1,200012207.
+    float q = avm_quantize(0.6f, AVM_FMT_SINT16);
+    CHECK(fabsf(q - 0.6f) > 1e-6f && fabsf((q + q) - 1.2f) > 1e-6f,
+          "en SInt16 los valores reales difieren de 0,6/1,2 más que la tolerancia: hacía falta cuantizar el esperado");
+}
+
 int main(void)
 {
     test_never_written_and_silence();
@@ -403,6 +646,11 @@ int main(void)
     test_measurement_does_not_change_audio();
     test_pack_unpack();
     test_concurrency();
+    test_int_destination_clip();
+    test_quantize();
+    test_reset_clears_meters();
+    test_reset_concurrent_readers();
+    test_selftest_clip_expectations();
     printf("Medidores: %d comprobaciones correctas, %d fallos\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

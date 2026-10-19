@@ -83,6 +83,8 @@ scripts/build.sh
 
 `build.sh` muestra la versión de macOS y de las herramientas, y compila el driver, la app y `avmctl` como binarios universales (Apple Silicon + Intel). Los firma, verifica las firmas y ejecuta las pruebas (núcleo, frecuencia e instalador). El resultado queda en `build/mac/`.
 
+**Icono de la app:** `build.sh` incluye `App/Resources/AVMatrix.icns`, declarado como `CFBundleIconFile` en `App/Info.plist`. Si ese archivo no existe, lo importa automáticamente de la app ya instalada (`/Applications/AV Matrix.app`) y lo deja en `App/Resources/` para las siguientes compilaciones. Si no lo encuentra en ninguna parte, se detiene para no generar una app con el icono genérico; `AVM_ALLOW_GENERIC_ICON=1` permite continuar sin él. También acepta `AVM_ICON_SOURCE=<archivo.icns>`. El instalador conserva el icono instalado si el paquete no trae uno.
+
 Para firmar con una identidad propia (por ejemplo Developer ID): `AVM_SIGN_IDENTITY="Developer ID Application: …" scripts/build.sh`. Sin esa variable se firma ad hoc.
 
 Si no se puede compilar en el Mac, `dist/` contiene una compilación precompilada. Se generó con compilación cruzada contra el SDK de macOS 15.5. Solo lleva la firma del enlazador, así que el instalador la rechaza salvo que se elija la firma de forma explícita (ver «Instalar»).

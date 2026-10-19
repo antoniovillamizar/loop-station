@@ -1,8 +1,75 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 5; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 6; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 5 — medidores de nivel en tiempo real (sobre `6658962`)
+## 0. Revisión 6 — saturación por formato, autoprueba SInt16, limpieza entre sesiones e icono (sobre `b6b52f0`)
+
+Codex compiló los tres componentes en el Mac y reprodujo cuatro problemas. Antes de modificar se hizo una copia de seguridad del proyecto en `b6b52f0`. **No se instaló nada ni se reinició coreaudiod.**
+
+**Qué se comprobó y dónde:**
+- **En Linux:** todo lo de esta sección.
+- **En un Mac:** nada nuevo. Lo único verificado en Mac sigue siendo lo que Codex hizo sobre `b6b52f0`: compilación y las pruebas incluidas.
+
+### 0.6.1 Saturación en los destinos según el formato (`Driver/src/avm_core.c`)
+
+- **Causa:** el destino comparaba `|suma| ≥ 1,0`. Con SInt16, la muestra 32767 equivale a 0,999969482 < 1,0: la muestra entregada era de escala completa, pero SAT seguía apagado.
+- **Corrección:** `avm_format_delivery_clip_level(fmt)` (`avm_core.c:311`) devuelve el umbral a partir del cual la conversión al formato entregado produce el código de escala completa (con el redondeo al más cercano que usa el driver):
+  - Float32 y SInt32: 1,0;
+  - SInt24: 8388606,5/2^23;
+  - SInt16: 32766,5/32768.
+- El destino usa ese umbral con su formato (`avm_core.c:605`). Así, **SAT se enciende exactamente cuando la muestra entregada es de escala completa**, también en negativo.
+- **Exceso por suma conservado:** toda suma ≥ 1,0 supera cualquier umbral, en los cuatro formatos.
+- **SInt32:** el transporte en float no distingue 2^31-1 de 2^31-2; el primer código por debajo de escala completa en float es 2^31 - 2^8. Está documentado en la prueba.
+
+### 0.6.2 Autoprueba con SInt16 (`Client/avmctl.c:439`)
+
+- **Causa:** `meters_during_clip` esperaba 0,6 y 1,2 exactos, pero en SInt16 llegan 19661/32768 = 0,600006104 y 1,200012207.
+- **Corrección:**
+  - Los valores esperados se calculan con los **formatos físicos reales**: salidas de Smaart para las fuentes y entradas de LISTENTO para la saturación del destino (`physical_format_of`, `:429`).
+  - Se usa `avm_quantize` (`avm_core.c:322`), la misma conversión de ida y vuelta del driver.
+  - El SAT esperado del Envío 1 se calcula con el umbral del formato del destino.
+- **La tolerancia sigue en 1e-6.** Las comprobaciones de aislamiento y de silencio no cambian: siguen siendo exactas.
+- **Prueba en Linux** (`test_selftest_clip_expectations`, `tests/test_meters.c:589`): reproduce esa fase en las **16 combinaciones** de formato de salida × formato de entrada, con conversión float → formato como el HAL. Comprueba los 6 medidores con tolerancia 1e-6 y los SAT esperados. También confirma que en SInt16 los valores reales difieren de 0,6 y 1,2 más que la tolerancia, que era el fallo de la prueba anterior.
+
+### 0.6.3 Limpieza de medidores entre sesiones (`avm_core.c:406`, `:253`)
+
+- **Causa:** `avm_engine_reset` vaciaba el buffer, pero no los medidores. Tras un reinicio, en los 250 ms siguientes se veían los picos de la sesión anterior.
+- **Corrección:** `avm_engine_reset`, que el driver llama en `StartIO` cuando empieza una sesión nueva, limpia los 34 medidores dentro de un **seqlock de sesión** (`meter_session`):
+  - lo pone impar, limpia, y lo pone par con `release`;
+  - `avm_engine_meter_snapshot` hace una sola pasada sin reintentos: si ve el contador impar, o cambiado durante la lectura, informa todo inactivo;
+  - nunca mezcla valores de dos sesiones;
+  - todos los accesos siguen siendo atómicos.
+- **Supuesto:** como antes, no hay IO durante `reset`. El driver lo llama solo cuando `running_total` pasa de 0 a 1, protegido por `gClockMutex`.
+
+### 0.6.4 Icono de la app
+
+- **El archivo `AVMatrix.icns` de Antonio no está en el repositorio ni en esta sesión. No se ha fabricado ningún icono.** Para que no vuelva el icono genérico, el flujo es este:
+  - **`App/Info.plist`:** `CFBundleIconFile = AVMatrix`.
+  - **`scripts/resolve_icon.sh`** (nuevo, usado por `build.sh` y por `make dist`): toma el icono de `AVM_ICON_SOURCE`, de `App/Resources/AVMatrix.icns` o de la app instalada. En el último caso lo importa a `App/Resources/` para las compilaciones siguientes. De la app instalada lo localiza por su `CFBundleIconFile`, por `AVMatrix.icns` o por cualquier `.icns` de sus recursos. Comprueba la firma «icns» y que el `Info.plist` lo declare.
+  - **`build.sh`:** copia el icono a `Contents/Resources/AVMatrix.icns` **antes de firmar**, para que quede sellado. **Si no hay icono, se detiene** con instrucciones (`AVM_ALLOW_GENERIC_ICON=1` permite continuar).
+  - **`make dist`:** lo incluye si existe `App/Resources/AVMatrix.icns`. En esta sesión no existe, así que **el `dist/` de este commit no trae icono**.
+  - **`install.sh`:**
+    - si el paquete trae icono, lo valida (firma «icns» y declaración en el plist);
+    - si no lo trae y la app instalada sí, **lo conserva**: lo copia a la app preparada y rehace la firma;
+    - la firma se rehace ad hoc si era ad hoc; una firma con identidad solo se rehace con `--sign-identity=<identidad>` y **nunca se degrada a ad hoc** (el instalador se detiene).
+- **Para dejarlo fijo en el repositorio:** copiar el icono de Antonio a `App/Resources/AVMatrix.icns` y hacer commit, o dejar que `build.sh` lo importe en el Mac y hacer commit de ese archivo.
+
+### 0.6.5 Pruebas
+
+| Prueba | Resultado (Linux) |
+| --- | --- |
+| `test_meters.c`: SInt16, SInt24 y SInt32 a escala completa (fuente y destino con SAT, código entregado máximo, mismo pico), código inferior (sin SAT), negativo a escala completa; float 0,99996 entregado en SInt16 como 32767 → SAT; en Float32 → sin SAT; suma 0,6 + 0,6 → SAT en los 4 formatos; cuantización (0,600006104 y 1,200012207); 16 combinaciones de la fase de saturación de `avmctl`; reinicio con consulta 10 ms después (los 34 inactivos, sin pico ni SAT); nueva sesión sin SAT heredada; reinicios con 2 lectores concurrentes (≈3,4 M lecturas) | **83/83**; ASan, UBSan y TSan sin avisos |
+| Mutaciones con los fallos de Codex: destino comparado con 1,0 (3 fallos: SInt16, SInt24 y float → SInt16); reinicio sin limpiar medidores (4 fallos) | Se detectan ambas |
+| `test_install.sh`: icono incluido; icono conservado con firma ad hoc rehecha en staging; Developer ID sin icono y sin identidad → error sin cambios; con identidad → conservado y firmado con ella; icono instalado con otro nombre; `.icns` inválido o no declarado → error por ese motivo, sin cambios | **83/83** |
+| `test_build_script.sh`: icono incluido y declarado; sin icono → error claro; importación desde la app instalada al proyecto (en rutas aisladas) y dentro de la nueva app; `.icns` inválido → error | **17/17** |
+| Núcleo, frecuencia y textos | 122/122, 115/115, 8/8 |
+| Compilación cruzada de driver, app y `avmctl` (SDK 15.5, arm64 + x86_64, `-Werror`) | Sin avisos |
+
+**Pendiente en el Mac:**
+- `avmctl test` y `avmctl test-all` con los medidores reales, en especial con SInt16;
+- ver el icono tras `build.sh` + instalación (opción A) o tras instalar `dist/` (opción B, icono conservado).
+
+## 0sexies. Revisión 5 — medidores de nivel en tiempo real (sobre `6658962`)
 
 Petición de Antonio: medidores por canal (barra, dBFS y saturación) en las 18 fuentes y los 16 destinos, junto a los nombres. Se conservan la matriz tipo Dante, los grupos desplegables, la REFERENCIA LOCAL, las conexiones y los presets. Antes de modificar se hizo una copia de seguridad del proyecto en `6658962`. **No se instaló nada ni se reinició coreaudiod.**
 

@@ -59,6 +59,9 @@ dist: cross
 	llvm-lipo-18 -create $(BUILD)/cross/avmctl_arm64 $(BUILD)/cross/avmctl_x86_64 -output dist/avmctl
 	llvm-lipo-18 -create $(BUILD)/cross/app_arm64 $(BUILD)/cross/app_x86_64 -output "dist/AV Matrix.app/Contents/MacOS/AVMatrix"
 	chmod +x dist/avmctl "dist/AV Matrix.app/Contents/MacOS/AVMatrix"
+	@bash scripts/resolve_icon.sh "dist/AV Matrix.app"; rc=$$?; \
+	if [ $$rc -eq 3 ]; then echo "Aviso: dist sin AVMatrix.icns (falta App/Resources/AVMatrix.icns); install.sh conservará el icono ya instalado."; \
+	elif [ $$rc -ne 0 ]; then exit 1; fi
 
 clean:
 	rm -rf $(BUILD)

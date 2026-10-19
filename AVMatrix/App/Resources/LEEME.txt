@@ -1,0 +1,8 @@
+Coloque aquí el icono personalizado de la app con el nombre AVMatrix.icns.
+
+scripts/build.sh lo incluye en "AV Matrix.app" (Contents/Resources/AVMatrix.icns,
+declarado en App/Info.plist como CFBundleIconFile). Si este archivo no existe,
+build.sh lo importa automáticamente desde la app ya instalada
+("/Applications/AV Matrix.app") y lo deja aquí para las siguientes compilaciones.
+Si no lo encuentra en ninguna parte, la compilación se detiene para no generar
+una app con el icono genérico (AVM_ALLOW_GENERIC_ICON=1 permite continuar).

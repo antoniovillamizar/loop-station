@@ -241,12 +241,34 @@ static avm_meter_reading avm_meter_read(avm_meter* m, uint64_t now_ns)
     return r;
 }
 
+static void avm_meter_clear(avm_meter* m)
+{
+    atomic_store_explicit(&m->last_update_ns, 0, memory_order_relaxed);
+    atomic_store_explicit(&m->last_clip_ns, 0, memory_order_relaxed);
+    atomic_store_explicit(&m->cur_peak, 0.0f, memory_order_relaxed);
+    atomic_store_explicit(&m->prev_peak, 0.0f, memory_order_relaxed);
+    atomic_store_explicit(&m->epoch, 0, memory_order_relaxed);
+}
+
 void avm_engine_meter_snapshot(avm_engine* e, uint64_t now_ns,
                                avm_meter_reading src[AVM_NUM_SOURCES],
                                avm_meter_reading dst[AVM_NUM_DESTS])
 {
-    for (int i = 0; i < AVM_NUM_SOURCES; i++) src[i] = avm_meter_read(&e->src_meters[i], now_ns);
-    for (int i = 0; i < AVM_NUM_DESTS; i++) dst[i] = avm_meter_read(&e->dst_meters[i], now_ns);
+    // Lado lector del seqlock de sesión: una sola pasada, sin reintentos.
+    uint32_t s1 = atomic_load_explicit(&e->meter_session, memory_order_acquire);
+    bool ok = (s1 & 1u) == 0;
+    if (ok) {
+        for (int i = 0; i < AVM_NUM_SOURCES; i++) src[i] = avm_meter_read(&e->src_meters[i], now_ns);
+        for (int i = 0; i < AVM_NUM_DESTS; i++) dst[i] = avm_meter_read(&e->dst_meters[i], now_ns);
+        atomic_thread_fence(memory_order_acquire);
+        ok = atomic_load_explicit(&e->meter_session, memory_order_relaxed) == s1;
+    }
+    if (!ok) {
+        // Reinicio en curso o recién hecho: todo inactivo, nunca valores de otra sesión.
+        const avm_meter_reading none = { 0.0f, false, false };
+        for (int i = 0; i < AVM_NUM_SOURCES; i++) src[i] = none;
+        for (int i = 0; i < AVM_NUM_DESTS; i++) dst[i] = none;
+    }
 }
 
 static void avm_put_u32(uint8_t* p, uint32_t v) { memcpy(p, &v, 4); }
@@ -284,6 +306,24 @@ bool avm_meters_unpack(const uint8_t* blob, size_t len,
         r->clip = p[5] != 0;
     }
     return true;
+}
+
+float avm_format_delivery_clip_level(avm_format fmt)
+{
+    switch (fmt) {
+        case AVM_FMT_SINT24: return 8388606.5f / 8388608.0f;
+        case AVM_FMT_SINT16: return 32766.5f / 32768.0f;
+        case AVM_FMT_SINT32:
+        case AVM_FMT_FLOAT32:
+        default:             return 1.0f;
+    }
+}
+
+float avm_quantize(float v, avm_format fmt)
+{
+    uint8_t b[4];
+    avm_float_to_sample(v, b, fmt);
+    return avm_sample_to_float(b, fmt);
 }
 
 float avm_format_clip_level(avm_format fmt)
@@ -360,6 +400,7 @@ void avm_engine_init(avm_engine* e)
     atomic_init(&e->stale_matrix_reads, 0);
     for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_meter_init(&e->src_meters[i]);
     for (int i = 0; i < AVM_NUM_DESTS; i++) avm_meter_init(&e->dst_meters[i]);
+    atomic_init(&e->meter_session, 0);
 }
 
 void avm_engine_reset(avm_engine* e)
@@ -370,6 +411,14 @@ void avm_engine_reset(avm_engine* e)
         atomic_store_explicit(&e->valid_begin[g], 0, memory_order_release);
         atomic_store_explicit(&e->writing_end[g], 0, memory_order_release);
     }
+
+    // Medidores: lado escritor del seqlock de sesión (impar durante la limpieza).
+    uint32_t sess = atomic_load_explicit(&e->meter_session, memory_order_relaxed);
+    atomic_store_explicit(&e->meter_session, sess + 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) avm_meter_clear(&e->src_meters[i]);
+    for (int i = 0; i < AVM_NUM_DESTS; i++) avm_meter_clear(&e->dst_meters[i]);
+    atomic_store_explicit(&e->meter_session, sess + 2, memory_order_release);
 }
 
 void avm_engine_set_matrix(avm_engine* e, const avm_matrix* m)
@@ -550,8 +599,12 @@ bool avm_engine_read_metered(avm_engine* e, avm_dst_group g, int64_t sample_time
             return false;
         }
     }
-    if (now_ns != 0)
+    if (now_ns != 0) {
+        // Saturación según el formato entregado: se enciende cuando la muestra
+        // entregada es de escala completa (y siempre que la suma alcanza 1,0).
+        const float clip_level = avm_format_delivery_clip_level(fmt);
         for (int c = 0; c < dnch; c++)
-            avm_meter_update(&e->dst_meters[dbase + c], peak[c], peak[c] >= 1.0f, now_ns);
+            avm_meter_update(&e->dst_meters[dbase + c], peak[c], peak[c] >= clip_level, now_ns);
+    }
     return true;
 }

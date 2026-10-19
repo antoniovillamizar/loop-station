@@ -33,6 +33,8 @@ sudo bash scripts/install.sh --dry-run --sign-identity=-
 
 Al final debe decir **«Prueba en seco correcta»**. Si sale **ERROR**, para aquí y envía lo que aparece en pantalla.
 
+**Icono:** con la opción A, `build.sh` toma el icono de la app que ya tienes instalada (o de `App/Resources/AVMatrix.icns`) y lo incluye; debe aparecer «Icono importado…» o «Icono: …». Con la opción B, el instalador conserva el icono instalado y debe aparecer «se conserva el icono instalado».
+
 ## 3. ⚠️ Antes de instalar: cierra Smaart, LISTENTO y Apple Music
 
 La instalación reinicia el servicio de audio de macOS (`coreaudiod`), y **todo el audio del Mac se corta unos segundos**. Cierra también Spotify, Tidal, tu DAW y cualquier otra app de audio.

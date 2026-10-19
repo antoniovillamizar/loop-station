@@ -22,6 +22,12 @@
 #   "-"           ad hoc solo para los componentes sin firma válida; una firma con
 #                 identidad (p. ej. Developer ID) se conserva
 #   "<identidad>" se firma con esa identidad lo que no esté ya firmado por ella
+#
+# Icono de la app (Contents/Resources/AVMatrix.icns, CFBundleIconFile):
+#   * si el paquete lo trae, se valida (firma «icns» y declaración en Info.plist);
+#   * si no lo trae y la app instalada tiene uno, se conserva: se copia a la app
+#     preparada y se rehace su firma (ad hoc si era ad hoc; una firma con
+#     identidad solo con --sign-identity=<identidad>, nunca se degrada a ad hoc).
 set -euo pipefail
 
 # --- Configuración (las variables AVM_* permiten probar el script fuera de /Library) ---
@@ -160,6 +166,20 @@ on_exit() {
 }
 trap on_exit EXIT
 
+is_icns() { [ -f "$1" ] && [ "$(head -c 4 "$1" 2>/dev/null)" = "icns" ]; }
+
+# Icono de la app instalada (según su CFBundleIconFile; si no, AVMatrix.icns).
+installed_app_icon() {
+    local app="$1" name="" cand
+    if [ -f "$app/Contents/Info.plist" ]; then
+        name=$(grep -A1 "<key>CFBundleIconFile</key>" "$app/Contents/Info.plist" 2>/dev/null | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p' | head -1 || true)
+    fi
+    for cand in "${name:+$app/Contents/Resources/$name}" "${name:+$app/Contents/Resources/$name.icns}" "$app/Contents/Resources/AVMatrix.icns" "$app"/Contents/Resources/*.icns; do
+        if [ -n "$cand" ] && is_icns "$cand"; then echo "$cand"; return 0; fi
+    done
+    return 1
+}
+
 executable_of() {
     local i="$1" src="$2"
     if [ -z "${BUNDLE_IDS[$i]}" ]; then
@@ -184,6 +204,10 @@ for i in 0 1 2; do
         if [ "$name" = driver ]; then
             grep -q "$HAL_PLUGIN_TYPE" "$plist" || die "driver: Info.plist sin el tipo AudioServerPlugIn"
             grep -q "<string>AVMatrix_Create</string>" "$plist" || die "driver: Info.plist sin la fábrica AVMatrix_Create"
+        fi
+        if [ "$name" = app ] && [ -e "$src/Contents/Resources/AVMatrix.icns" ]; then
+            is_icns "$src/Contents/Resources/AVMatrix.icns" || die "app: Contents/Resources/AVMatrix.icns no es un icono .icns válido"
+            grep -q "<key>CFBundleIconFile</key>" "$plist" || die "app: trae AVMatrix.icns pero Info.plist no declara CFBundleIconFile"
         fi
     fi
     exe=$(executable_of "$i" "$src")
@@ -232,6 +256,29 @@ for i in 0 1 2; do
         chmod -R go-w "$stage"
     elif [ "$name" = cli ]; then
         chmod 755 "$stage"
+    fi
+    if [ "$name" = app ] && [ ! -e "$stage/Contents/Resources/AVMatrix.icns" ]; then
+        if old_icon=$(installed_app_icon "$dest"); then
+            grep -q "<key>CFBundleIconFile</key>" "$stage/Contents/Info.plist" \
+                || die "app: el paquete no trae icono y su Info.plist no declara CFBundleIconFile; compile con scripts/build.sh"
+            mkdir -p "$stage/Contents/Resources"
+            cp -p "$old_icon" "$stage/Contents/Resources/AVMatrix.icns"
+            # Añadir un recurso invalida la firma del bundle: hay que rehacerla.
+            if [ -z "${SIGN_WITH[$i]}" ]; then
+                case "${ORIG_SIG[$i]}" in
+                    adhoc) SIGN_WITH[$i]="-" ;;
+                    *)
+                        if [ -n "$SIGN_IDENTITY_SET" ] && [ "$SIGN_IDENTITY" != "-" ]; then
+                            SIGN_WITH[$i]="$SIGN_IDENTITY"
+                        else
+                            die "app: el paquete no trae el icono y su firma (${ORIG_SIG[$i]#identity:}) no se puede rehacer ad hoc. Compile con scripts/build.sh (incluye el icono) o use --sign-identity=<identidad>"
+                        fi ;;
+                esac
+            fi
+            log "  app: se conserva el icono instalado ($old_icon)"
+        else
+            log "  Aviso: la app no trae icono personalizado y no hay uno instalado: se verá el icono genérico."
+        fi
     fi
     if [ -n "${SIGN_WITH[$i]}" ]; then
         "$CODESIGN" --force --sign "${SIGN_WITH[$i]}" --timestamp=none "$stage" || die "$name: falló la firma con '${SIGN_WITH[$i]}'"

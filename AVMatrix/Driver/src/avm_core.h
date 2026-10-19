@@ -146,6 +146,10 @@ typedef struct {
 
     avm_meter           src_meters[AVM_NUM_SOURCES];
     avm_meter           dst_meters[AVM_NUM_DESTS];
+    // Sesión de los medidores (seqlock): avm_engine_reset lo pone impar mientras
+    // los limpia y par al terminar. Un lector que lo ve impar o cambiado durante
+    // su lectura informa «inactivo»: nunca mezcla valores de dos sesiones.
+    _Atomic uint32_t    meter_session;
 } avm_engine;
 
 // --- Descripción de grupos -------------------------------------------------
@@ -171,7 +175,9 @@ bool avm_matrix_is_valid(const avm_matrix* m);
 
 // --- Motor -----------------------------------------------------------------
 void avm_engine_init(avm_engine* e);
-// Vacía los buffers y la historia de escritura. No usar mientras haya IO activo.
+// Vacía los buffers, la historia de escritura y los medidores (nueva sesión).
+// No usar mientras haya IO activo; los lectores de medidores pueden seguir
+// leyendo durante el reinicio: verán «inactivo» y nunca picos de la sesión anterior.
 void avm_engine_reset(avm_engine* e);
 // Publica una matriz. Los escritores deben estar serializados por el llamador.
 // Nunca bloquea a los lectores.
@@ -207,6 +213,16 @@ bool avm_meters_unpack(const uint8_t* blob, size_t len,
 // Nivel de saturación de la entrada de una fuente según su formato físico:
 // el valor de escala completa que ese formato puede representar.
 float avm_format_clip_level(avm_format fmt);
+
+// Saturación de un destino según el formato en que se entrega: el umbral a
+// partir del cual la conversión produce el código de escala completa (con
+// redondeo al más cercano). Float32 y SInt32: 1,0. SInt24: 8388606,5/2^23.
+// SInt16: 32766,5/32768. Una suma de 1,0 o más siempre supera el umbral.
+float avm_format_delivery_clip_level(avm_format fmt);
+
+// Valor float tras pasar por el formato `fmt` (ida y vuelta, con la misma
+// conversión que el driver). Sirve para calcular valores esperados exactos.
+float avm_quantize(float v, avm_format fmt);
 
 // Pico lineal -> dBFS (20·log10). Devuelve -INFINITY para 0 (silencio digital).
 float avm_peak_to_dbfs(float peak);

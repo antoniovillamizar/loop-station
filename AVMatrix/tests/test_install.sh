@@ -43,6 +43,10 @@ fi
 exit 0
 EOF
     chmod +x "$d/AVMatrix.driver/Contents/MacOS/AVMatrix" "$d/AV Matrix.app/Contents/MacOS/AVMatrix" "$d/avmctl"
+    if [ -n "${MAKE_ICON:-}" ]; then
+        mkdir -p "$d/AV Matrix.app/Contents/Resources"
+        printf 'icns-icono-%s' "$MAKE_ICON" > "$d/AV Matrix.app/Contents/Resources/AVMatrix.icns"
+    fi
     set_sig "$d/AVMatrix.driver" "$3"
     set_sig "$d/AV Matrix.app" "$4"
     set_sig "$d/avmctl" "$5"
@@ -231,6 +235,89 @@ check "prueba en seco: termina bien" [ $rc -eq 0 ]
 check "prueba en seco: nada cambia" [ "$(snapshot)" = "$before" ]
 check "prueba en seco: sin respaldo nuevo" [ -z "$(ls -A "$T/backups")" ]
 check "prueba en seco: no reinicia" [ ! -s "$T/restarts" ]
+rm -rf "$T"
+
+# --- Icono de la app (revisión 6) ---------------------------------------------
+APPI="Applications/AV Matrix.app/Contents/Resources/AVMatrix.icns"
+icon_is() { [ "$(cat "$T/inst/$APPI" 2>/dev/null)" = "icns-icono-$1" ]; }
+
+# I1. El paquete trae el icono: se instala tal cual, sin firmar nada.
+new_env
+MAKE_ICON=nuevo make_dist "$T/dist" v1 adhoc adhoc adhoc
+INSTALL_ARGS="--no-restart" run_install; rc=$?
+check "icono en el paquete: termina bien" [ $rc -eq 0 ]
+check "icono en el paquete: instalado" icon_is nuevo
+check "icono en el paquete: no se rehace ninguna firma" [ ! -s "$T/signlog" ]
+rm -rf "$T"
+
+# I2. El paquete no trae icono y la app instalada sí: se conserva y se rehace la firma ad hoc.
+new_env
+MAKE_ICON=antonio make_dist "$T/dist" v1 adhoc adhoc adhoc
+INSTALL_ARGS="--no-restart" run_install || echo "no se pudo preparar v1 con icono"
+: > "$T/signlog"
+make_dist "$T/dist" v2 adhoc adhoc adhoc
+INSTALL_ARGS="--no-restart" run_install; rc=$?
+check "sin icono en el paquete: termina bien" [ $rc -eq 0 ]
+check "sin icono en el paquete: se conserva el icono instalado" icon_is antonio
+check "sin icono en el paquete: queda v2" [ "$(installed_version)" = v2 ]
+check "sin icono en el paquete: se rehace la firma ad hoc de la app en staging" bash -c "grep -q 'sign - .*AV Matrix.app.new' '$T/signlog'"
+check "sin icono en el paquete: la app instalada queda firmada" [ "$(sig_of "$T/inst/Applications/AV Matrix.app")" = "Signature=adhoc" ]
+check "sin icono en el paquete: lo indica" file_has "$T/out" "se conserva el icono instalado"
+rm -rf "$T"
+
+# I3. Paquete Developer ID sin icono y sin identidad elegida: no se degrada a ad hoc.
+new_env
+MAKE_ICON=antonio make_dist "$T/dist" v1 adhoc adhoc adhoc
+INSTALL_ARGS="--no-restart" run_install || echo "no se pudo preparar v1 con icono"
+: > "$T/signlog"; before=$(snapshot)
+make_dist "$T/dist" v2 adhoc "id:Developer ID Application: Antonio (TEAM1)" adhoc
+run_install AVM_SIGN_IDENTITY=-; rc=$?
+check "Developer ID sin icono: devuelve error" [ $rc -ne 0 ]
+check "Developer ID sin icono: no firma ad hoc" bash -c "! grep -q 'sign - .*AV Matrix.app' '$T/signlog'"
+check "Developer ID sin icono: lo instalado queda idéntico" [ "$(snapshot)" = "$before" ]
+
+# I4. ...y con la identidad indicada: se conserva el icono y se firma con ella.
+run_install "AVM_SIGN_IDENTITY=Developer ID Application: Antonio (TEAM1)"; rc=$?
+check "Developer ID sin icono + identidad: termina bien" [ $rc -eq 0 ]
+check "Developer ID sin icono + identidad: icono conservado" icon_is antonio
+check "Developer ID sin icono + identidad: firmada con esa identidad" \
+    [ "$(sig_of "$T/inst/Applications/AV Matrix.app")" = "Authority=Developer ID Application: Antonio (TEAM1)" ]
+rm -rf "$T"
+
+# I5. Icono con otro nombre en la app instalada (CFBundleIconFile=Personal): también se conserva.
+new_env
+make_dist "$T/dist" v1 adhoc adhoc adhoc
+INSTALL_ARGS="--no-restart" run_install || echo "no se pudo preparar v1"
+P="$T/inst/Applications/AV Matrix.app/Contents"
+mkdir -p "$P/Resources"; printf 'icns-icono-personal' > "$P/Resources/Personal.icns"
+# CFBundleIconFile de la app instalada -> «Personal» (solo la línea que sigue a la clave).
+awk 'prev ~ /<key>CFBundleIconFile<\/key>/ { sub(/<string>[^<]*<\/string>/, "<string>Personal</string>") } { print; prev = $0 }' \
+    "$P/Info.plist" > "$P/Info.plist.tmp" && mv "$P/Info.plist.tmp" "$P/Info.plist"
+check "preparación: la app instalada declara Personal" grep -q "<string>Personal</string>" "$P/Info.plist"
+make_dist "$T/dist" v2 adhoc adhoc adhoc
+INSTALL_ARGS="--no-restart" run_install; rc=$?
+check "icono con otro nombre: termina bien" [ $rc -eq 0 ]
+check "icono con otro nombre: se conserva como AVMatrix.icns" icon_is personal
+rm -rf "$T"
+
+# I6. Icono inválido o no declarado en el paquete: no se instala nada.
+new_env; seed_v1; before=$(snapshot)
+MAKE_ICON=x make_dist "$T/dist" v2 adhoc adhoc adhoc
+printf 'PNG no es icns' > "$T/dist/AV Matrix.app/Contents/Resources/AVMatrix.icns"
+run_install; rc=$?
+check "icono inválido: devuelve error" [ $rc -ne 0 ]
+check "icono inválido: nada cambia" [ "$(snapshot)" = "$before" ]
+check "icono inválido: el motivo es el icono" file_has "$T/out" "no es un icono .icns válido"
+MAKE_ICON=x make_dist "$T/dist" v2 adhoc adhoc adhoc
+P="$T/dist/AV Matrix.app/Contents/Info.plist"
+# Quita solo la clave CFBundleIconFile y su valor.
+awk '/<key>CFBundleIconFile<\/key>/ { skip = 1; next } skip { skip = 0; next } { print }' "$P" > "$P.tmp" && mv "$P.tmp" "$P"
+check "preparación: el paquete conserva CFBundleExecutable" grep -q "<key>CFBundleExecutable</key>" "$P"
+check "preparación: el paquete ya no declara el icono" bash -c "! grep -q CFBundleIconFile '$P'"
+run_install; rc=$?
+check "icono no declarado en Info.plist: devuelve error" [ $rc -ne 0 ]
+check "icono no declarado: nada cambia" [ "$(snapshot)" = "$before" ]
+check "icono no declarado: el motivo es el icono" file_has "$T/out" "no declara CFBundleIconFile"
 rm -rf "$T"
 
 echo "Instalador: $PASS comprobaciones correctas, $FAIL fallos"

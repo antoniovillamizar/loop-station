@@ -425,22 +425,36 @@ static void meters_during_isolation(void)
     }
 }
 
+// Formato físico actual de un stream (Float32 si no se puede leer).
+static avm_format physical_format_of(avm_device_kind k, bool input)
+{
+    AudioStreamBasicDescription asbd;
+    if (avm_get_physical_format(k, input, &asbd) == noErr) {
+        int f = avm_format_from_asbd(&asbd);
+        if (f >= 0) return (avm_format)f;
+    }
+    return AVM_FMT_FLOAT32;
+}
+
 static void meters_during_clip(void)
 {
     avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
     if (avm_get_meters(s, d) != noErr) { printf("  FALLO  no se pudieron leer los medidores\n"); g_meter_pass = 0; return; }
-    // Con formato físico entero, 1,0 llega como el código máximo (p. ej. 32767/32768).
-    AudioStreamBasicDescription asbd;
-    float full = 1.0f;
-    if (avm_get_physical_format(AVM_DEV_SMAART, false, &asbd) == noErr) {
-        int f = avm_format_from_asbd(&asbd);
-        if (f >= 0) full = avm_format_clip_level((avm_format)f);
-    }
-    meter_expect("Smaart Salida 1 a 0 dBFS (SAT)", &s[AVM_SRC_SMAART_BASE + 0], full, 1);
-    meter_expect("Smaart Salida 2 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 1], kClipOut[1], 0);
-    meter_expect("Smaart Salida 3 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 2], kClipOut[2], 0);
-    meter_expect("LISTENTO Envío 1 = Salida 1 (SAT)", &d[AVM_DST_LINK_BASE + 0], full, 1);
-    meter_expect("LISTENTO Envío 2 = 0,6 + 0,6 (SAT)", &d[AVM_DST_LINK_BASE + 1], kClipOut[1] + kClipOut[2], 1);
+    // Valores esperados exactos según los formatos físicos reales: lo que envía
+    // la prueba pasa por el formato de Smaart (salidas) antes de llegar al driver,
+    // y el destino suma esos valores ya cuantizados y se entrega en el formato de
+    // LISTENTO (entradas). Ejemplo SInt16: 0,6 -> 19661/32768 = 0,600006104.
+    const avm_format src_fmt = physical_format_of(AVM_DEV_SMAART, false);
+    const avm_format dst_fmt = physical_format_of(AVM_DEV_LISTENTO, true);
+    const float q0 = avm_quantize(kClipOut[0], src_fmt);
+    const float q1 = avm_quantize(kClipOut[1], src_fmt);
+    const float q2 = avm_quantize(kClipOut[2], src_fmt);
+    const float dst_clip = avm_format_delivery_clip_level(dst_fmt);
+    meter_expect("Smaart Salida 1 a 0 dBFS (SAT)", &s[AVM_SRC_SMAART_BASE + 0], q0, 1);
+    meter_expect("Smaart Salida 2 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 1], q1, 0);
+    meter_expect("Smaart Salida 3 a 0,6 (sin SAT)", &s[AVM_SRC_SMAART_BASE + 2], q2, 0);
+    meter_expect("LISTENTO Envío 1 = Salida 1", &d[AVM_DST_LINK_BASE + 0], q0, q0 >= dst_clip);
+    meter_expect("LISTENTO Envío 2 = 0,6 + 0,6 (SAT)", &d[AVM_DST_LINK_BASE + 1], q1 + q2, 1);
     meter_expect("LISTENTO Envío 3 sin ruta (silencio)", &d[AVM_DST_LINK_BASE + 2], 0.0f, 0);
 }
 
