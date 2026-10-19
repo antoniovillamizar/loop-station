@@ -79,6 +79,13 @@ clang $CFLAGS -o "$OUT/test_names" tests/test_names.c Client/avm_names.c
 "$OUT/test_names"
 bash tests/test_install.sh
 bash tests/test_app_strings.sh
+# Prueba nativa del panel de nombres (AppKit): tamaño, mensajes de error y
+# liberación de memoria. Muestra brevemente el panel en pantalla; con
+# AVM_UI_NO_WINDOW=1 solo hace las comprobaciones sin ventana.
+clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
+    -o "$OUT/test_rename_ui" tests/test_rename_ui.m Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
+    -framework Cocoa -framework CoreAudio -framework CoreFoundation
+"$OUT/test_rename_ui"
 
 echo "== Verificación =="
 lipo -info "$DRV/Contents/MacOS/AVMatrix"

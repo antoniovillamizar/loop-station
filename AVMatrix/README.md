@@ -105,7 +105,10 @@ Si no se puede compilar en el Mac, `dist/` contiene una compilación precompilad
 sudo scripts/install.sh --dry-run      # solo comprueba; no toca nada instalado
 sudo scripts/install.sh                # instala, reinicia coreaudiod y comprueba
 sudo scripts/install.sh --no-restart   # instala sin reiniciar coreaudiod
+sudo scripts/install.sh --app-only     # actualiza SOLO la app; no toca el driver ni reinicia coreaudiod
 ```
+
+`--app-only` sirve para las versiones que solo cambian la app (por ejemplo, la revisión 9). Valida, respalda y sustituye únicamente `/Applications/AV Matrix.app`, conserva el icono instalado y los nombres de los canales, y no corta el audio. El driver y `avmctl` quedan byte a byte iguales.
 
 La instalación es transaccional:
 

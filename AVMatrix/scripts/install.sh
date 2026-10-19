@@ -4,6 +4,8 @@
 #   sudo scripts/install.sh               instala, reinicia coreaudiod y comprueba
 #   sudo scripts/install.sh --no-restart  instala y verifica archivos; no reinicia coreaudiod
 #   sudo scripts/install.sh --dry-run     solo valida y prepara en staging; no toca lo instalado
+#   sudo scripts/install.sh --app-only    actualiza SOLO la app (/Applications/AV Matrix.app):
+#                                         no toca el driver ni avmctl y nunca reinicia coreaudiod
 #   sudo scripts/install.sh --sign-identity=-   equivale a AVM_SIGN_IDENTITY=- (ver «Firma»)
 #
 # Pasos:
@@ -47,10 +49,12 @@ HAL_PLUGIN_TYPE="443ABAB8-E7B3-491A-B985-BEB9187030DB"
 
 DO_RESTART=1
 DRY_RUN=0
+APP_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --no-restart) DO_RESTART=0 ;;
         --dry-run)    DRY_RUN=1; DO_RESTART=0 ;;
+        --app-only)   APP_ONLY=1 ;;
         --sign-identity=*) SIGN_IDENTITY="${arg#--sign-identity=}"; SIGN_IDENTITY_SET=x ;;
         *) echo "Opción desconocida: $arg" >&2; exit 2 ;;
     esac
@@ -63,11 +67,13 @@ fi
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
+# La app no carga código en coreaudiod: actualizarla sola nunca lo reinicia.
+[ "$APP_ONLY" = 0 ] || DO_RESTART=0
 if [ -n "${AVM_SRC_DIR:-}" ]; then
     SRC="$AVM_SRC_DIR"
-elif [ -d "$ROOT/build/mac/AVMatrix.driver" ]; then
+elif [ -d "$ROOT/build/mac/AV Matrix.app" ] && { [ "$APP_ONLY" = 1 ] || [ -d "$ROOT/build/mac/AVMatrix.driver" ]; }; then
     SRC="$ROOT/build/mac"
-elif [ -d "$ROOT/dist/AVMatrix.driver" ]; then
+elif [ -d "$ROOT/dist/AV Matrix.app" ] && { [ "$APP_ONLY" = 1 ] || [ -d "$ROOT/dist/AVMatrix.driver" ]; }; then
     SRC="$ROOT/dist"
     echo "Aviso: se usa la compilación precompilada de dist/. Se recomienda scripts/build.sh."
 else
@@ -86,6 +92,9 @@ NAMES=(driver app cli)
 SRCS=("$SRC/AVMatrix.driver" "$SRC/AV Matrix.app" "$SRC/avmctl")
 DESTS=("$HAL/AVMatrix.driver" "$APPS/AV Matrix.app" "$BIN/avmctl")
 BUNDLE_IDS=("com.antoniovillamizar.avmatrix.driver" "com.antoniovillamizar.avmatrix.app" "")
+
+# Componentes que se instalan (índices en NAMES).
+if [ "$APP_ONLY" = 1 ]; then COMPONENTS=(1); else COMPONENTS=(0 1 2); fi
 
 declare -a STAGED=("" "" "")
 declare -a OLD=("" "" "")
@@ -191,9 +200,10 @@ executable_of() {
     fi
 }
 
-# --- 1. Validación de los tres componentes -----------------------------------
+# --- 1. Validación de los componentes -------------------------------------------
 log "== 1. Validación (origen: $SRC) =="
-for i in 0 1 2; do
+[ "$APP_ONLY" = 0 ] || log "  Solo la app (--app-only): el driver y avmctl instalados no se tocan; no se reiniciará coreaudiod."
+for i in "${COMPONENTS[@]}"; do
     name="${NAMES[$i]}" src="${SRCS[$i]}"
     [ -e "$src" ] || die "$name: falta $src"
     if [ -n "${BUNDLE_IDS[$i]}" ]; then
@@ -237,7 +247,7 @@ done
 
 # --- 2. Staging ----------------------------------------------------------------
 log "== 2. Preparación en staging =="
-for i in 0 1 2; do
+for i in "${COMPONENTS[@]}"; do
     name="${NAMES[$i]}" src="${SRCS[$i]}" dest="${DESTS[$i]}"
     dir=$(dirname "$dest")
     mkdir -p "$dir"
@@ -295,14 +305,14 @@ for i in 0 1 2; do
 done
 
 if [ "$DRY_RUN" = 1 ]; then
-    log "Prueba en seco correcta: los tres componentes son válidos. No se instaló nada."
+    log "Prueba en seco correcta: los componentes son válidos. No se instaló nada."
     SUCCESS=1
     exit 0
 fi
 
 # --- 3. Respaldo -----------------------------------------------------------------
 log "== 3. Respaldo =="
-for i in 0 1 2; do
+for i in "${COMPONENTS[@]}"; do
     dest="${DESTS[$i]}"
     if [ -e "$dest" ]; then
         mkdir -p "$BACKUP"
@@ -316,7 +326,7 @@ if [ -d "$BACKUP" ] && [ -n "${SUDO_USER:-}" ]; then "$CHOWN" -R "$SUDO_USER" "$
 # --- 4. Sustitución --------------------------------------------------------------
 log "== 4. Sustitución =="
 SWAP_STARTED=1
-for i in 0 1 2; do
+for i in "${COMPONENTS[@]}"; do
     dest="${DESTS[$i]}"
     if [ -e "$dest" ]; then
         OLD[$i]="$(dirname "$dest")/.$(basename "$dest").old.$TAG"
@@ -332,7 +342,7 @@ done
 
 # --- 5. Verificación -------------------------------------------------------------
 log "== 5. Verificación =="
-for i in 0 1 2; do
+for i in "${COMPONENTS[@]}"; do
     st=$(sig_state "${DESTS[$i]}")
     [ "$st" != invalid ] || die "${NAMES[$i]}: firma inválida en el destino"
     if [ -n "${BUNDLE_IDS[$i]}" ]; then
@@ -340,6 +350,13 @@ for i in 0 1 2; do
     fi
 done
 log "  archivos instalados y firmas correctas"
+
+if [ "$APP_ONLY" = 1 ]; then
+    log "App actualizada. No se tocó el driver ni avmctl y no se reinició coreaudiod."
+    log "Los nombres de los canales (~/Library/Application Support/AV Matrix) se conservan."
+    SUCCESS=1
+    exit 0
+fi
 
 if [ "$DO_RESTART" = 0 ]; then
     log "No se reinició coreaudiod (--no-restart). El driver se cargará en el próximo reinicio de"

@@ -52,6 +52,9 @@ cross:
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
 	    -o $(BUILD)/cross/app_$$a App/AVMatrixApp.m Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
 	    -framework Cocoa -framework CoreAudio -framework CoreFoundation || exit 1; \
+	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
+	    -o $(BUILD)/cross/test_rename_ui_$$a tests/test_rename_ui.m Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
+	    -framework Cocoa -framework CoreAudio -framework CoreFoundation || exit 1; \
 	done
 
 dist: cross

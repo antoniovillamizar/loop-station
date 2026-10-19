@@ -99,6 +99,21 @@ Anota lo que observes:
 
 La configuración queda en el preset de medición, que es la que se usará con LISTENTO más adelante. No hace falta cambiar nada.
 
+## Actualizar solo la app (sin tocar el driver ni cortar el audio)
+
+Cuando una versión solo cambia la app (como la revisión 9, con el panel de nombres corregido):
+
+1. Cierra la app **AV Matrix** (no hace falta cerrar Smaart ni LISTENTO: el audio no se corta).
+2. Compila y comprueba:
+   ```bash
+   bash scripts/build.sh
+   sudo bash scripts/install.sh --app-only --dry-run
+   ```
+   Durante `build.sh`, el panel de nombres se abre y se cierra solo varias veces en pantalla (prueba nativa). Debe terminar con «Panel de nombres: … 0 fallos».
+3. Instala: `sudo bash scripts/install.sh --app-only` (con la versión precompilada: añade `--sign-identity=-`).
+
+Debe terminar con **«App actualizada. No se tocó el driver ni avmctl y no se reinició coreaudiod.»** La app anterior queda en `~/AVMatrix-backups/<fecha>/`. Los nombres de los canales y el icono se conservan.
+
 ## Desinstalar
 
 Cierra las apps de audio (el audio se corta unos segundos) y ejecuta:

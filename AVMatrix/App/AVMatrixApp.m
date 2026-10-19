@@ -687,9 +687,17 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
 
 // Panel de edición: Enter guarda, Escape (o clic fuera) cancela, «Restaurar
 // nombre original» quita el alias. Solo cambia el texto mostrado por la app.
-@interface AVMRenameController : NSViewController <NSTextFieldDelegate, NSPopoverDelegate>
+//
+// Propiedad: el AVMController retiene el NSPopover mientras está abierto; el
+// popover retiene a este controlador (contentViewController) y este solo guarda
+// una referencia DÉBIL al popover. Así no hay ciclo: al cerrarse y soltarlo el
+// AVMController, se liberan los dos.
+static const CGFloat kRenameW = 420.0;   // ancho fijo del panel (pt)
+static NSString* const kRenameSaveFailed = @"No se pudo guardar el nombre en disco; no se ha cambiado.";
+
+@interface AVMRenameController : NSViewController <NSTextFieldDelegate>
 @property (assign) int index;
-@property (strong) NSPopover* popover;
+@property (weak) NSPopover* popover;
 @property (strong) NSTextField* field;
 @property (strong) NSTextField* errorLabel;
 @property (copy) void (^onChange)(void);
@@ -721,9 +729,11 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     self.field.delegate = self;
     [self.field.widthAnchor constraintGreaterThanOrEqualToConstant:280].active = YES;
 
-    self.errorLabel = [NSTextField labelWithString:@""];
+    // Mensaje de error en varias líneas si hace falta: nunca se recorta.
+    self.errorLabel = [NSTextField wrappingLabelWithString:@""];
     self.errorLabel.font = [NSFont systemFontOfSize:10];
     self.errorLabel.textColor = [NSColor systemRedColor];
+    self.errorLabel.preferredMaxLayoutWidth = kRenameW - 24;
     self.errorLabel.hidden = YES;
 
     NSTextField* help = [NSTextField labelWithString:[NSString stringWithFormat:@"Enter guarda · Esc cancela · vacío = nombre original · máximo %d caracteres", AVM_ALIAS_MAX_CHARS]];
@@ -743,7 +753,33 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     v.alignment = NSLayoutAttributeLeading;
     v.spacing = 6;
     v.edgeInsets = NSEdgeInsetsMake(12, 12, 12, 12);
+    [v.widthAnchor constraintEqualToConstant:kRenameW].active = YES;
+    [self.errorLabel.widthAnchor constraintEqualToConstant:kRenameW - 24].active = YES;
     self.view = v;
+    [self updateSize];
+}
+
+// Tamaño explícito: NSPopover no lo deduce de la vista (quedaría en 0 × 0).
+// Se recalcula al mostrar u ocultar el mensaje de error.
+- (void)updateSize
+{
+    NSView* v = self.view;
+    [v layoutSubtreeIfNeeded];
+    NSSize s = v.fittingSize;
+    s.width = MAX(s.width, kRenameW);
+    s.width = ceil(s.width);
+    s.height = ceil(s.height);
+    [v setFrameSize:s];
+    self.preferredContentSize = s;
+    self.popover.contentSize = s;
+    [v layoutSubtreeIfNeeded];
+}
+
+- (void)showMessage:(NSString*)msg
+{
+    self.errorLabel.stringValue = msg;
+    self.errorLabel.hidden = NO;
+    [self updateSize];
 }
 
 - (void)viewDidAppear
@@ -777,8 +813,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     change();
     if (!avm_names_save(&gNames, NamesFilePath().fileSystemRepresentation)) {
         gNames = previous;
-        self.errorLabel.stringValue = @"No se pudo guardar el nombre en disco; no se ha cambiado.";
-        self.errorLabel.hidden = NO;
+        [self showMessage:kRenameSaveFailed];
         return NO;
     }
     if (self.onChange) self.onChange();
@@ -795,13 +830,11 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
     char clean[AVM_ALIAS_MAX_BYTES + 1];
     avm_name_status st = avm_names_normalize(utf8, clean, sizeof(clean));
     if (st == AVM_NAME_TOO_LONG) {
-        self.errorLabel.stringValue = [NSString stringWithFormat:@"El nombre tiene más de %d caracteres.", AVM_ALIAS_MAX_CHARS];
-        self.errorLabel.hidden = NO;
+        [self showMessage:[NSString stringWithFormat:@"El nombre tiene más de %d caracteres.", AVM_ALIAS_MAX_CHARS]];
         return;
     }
     if (st == AVM_NAME_INVALID_UTF8) {
-        self.errorLabel.stringValue = @"El texto contiene caracteres no válidos.";
-        self.errorLabel.hidden = NO;
+        [self showMessage:@"El texto contiene caracteres no válidos."];
         return;
     }
     int idx = self.index;
@@ -818,10 +851,24 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
 
 @end
 
+// Crea el panel de edición ya dimensionado (sin mostrarlo).
+static NSPopover* AVMMakeRenamePopover(int idx, void (^onChange)(void))
+{
+    AVMRenameController* rc = [[AVMRenameController alloc] initWithIndex:idx];
+    rc.onChange = onChange;
+    (void)rc.view;                                // carga y calcula el tamaño
+    NSPopover* pop = [[NSPopover alloc] init];
+    pop.behavior = NSPopoverBehaviorTransient;   // clic fuera = cancelar
+    pop.contentViewController = rc;
+    rc.popover = pop;                            // débil
+    pop.contentSize = rc.preferredContentSize;
+    return pop;
+}
+
 // ---------------------------------------------------------------------------
 #pragma mark Controlador
 
-@interface AVMController : NSObject <NSApplicationDelegate, NSWindowDelegate, AVMMatrixViewDelegate>
+@interface AVMController : NSObject <NSApplicationDelegate, NSWindowDelegate, AVMMatrixViewDelegate, NSPopoverDelegate>
 @property (strong) NSWindow* window;
 @property (strong) NSTextField* statusLabel;
 @property (strong) NSTextField* infoLabel;
@@ -834,7 +881,7 @@ static NSString* LevelText(avm_meter_reading r, BOOL decimals)
 @property (strong) NSStackView* root;
 @property (assign) BOOL listening;
 @property (strong) NSTimer* meterTimer;
-@property (strong) AVMRenameController* renamer;
+@property (strong) NSPopover* renamePopover;   // panel abierto; se suelta al cerrarse
 @end
 
 static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
@@ -1128,16 +1175,23 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 - (void)matrixView:(AVMMatrixView*)view renameChannel:(int)idx anchor:(NSRect)anchor
 {
     if (idx < 0 || idx >= AVM_NAMES_COUNT) return;
-    [self.renamer.popover close];
-    AVMRenameController* rc = [[AVMRenameController alloc] initWithIndex:idx];
+    [self.renamePopover close];
+    self.renamePopover = nil;
     __weak AVMController* weakSelf = self;
-    rc.onChange = ^{ [weakSelf namesChanged]; };
-    NSPopover* pop = [[NSPopover alloc] init];
-    pop.contentViewController = rc;
-    pop.behavior = NSPopoverBehaviorTransient;   // clic fuera = cancelar
-    rc.popover = pop;
-    self.renamer = rc;
+    NSPopover* pop = AVMMakeRenamePopover(idx, ^{ [weakSelf namesChanged]; });
+    pop.delegate = self;
+    self.renamePopover = pop;
     [pop showRelativeToRect:anchor ofView:view preferredEdge:(idx >= AVM_NUM_SOURCES ? NSRectEdgeMaxX : NSRectEdgeMaxY)];
+}
+
+- (void)popoverDidClose:(NSNotification*)n
+{
+    NSPopover* closed = n.object;
+    if (closed != self.renamePopover) return;
+    self.renamePopover = nil;
+    // Se libera en la siguiente vuelta del bucle, nunca dentro de una acción
+    // del propio panel (Guardar, Restaurar, Cancelar).
+    dispatch_async(dispatch_get_main_queue(), ^{ (void)closed; });
 }
 
 - (void)matrixView:(AVMMatrixView*)view restoreChannelName:(int)idx
@@ -1229,6 +1283,7 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 
 @end
 
+#ifndef AVM_APP_NO_MAIN   // las pruebas nativas incluyen este archivo sin main
 int main(int argc, const char* argv[])
 {
     (void)argc; (void)argv;
@@ -1241,3 +1296,4 @@ int main(int argc, const char* argv[])
     }
     return 0;
 }
+#endif

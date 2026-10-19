@@ -18,7 +18,13 @@ done
 [ ${#srcs[@]} -gt 0 ] || { echo "clang: error: no input files" >&2; exit 1; }
 for f in "${srcs[@]}"; do [ -f "$f" ] || { echo "clang: error: no such file or directory: '$f'" >&2; exit 1; }; done
 [ -n "$out" ] || { echo "clang simulado: falta -o" >&2; exit 1; }
+is_objc=0; for f in "${srcs[@]}"; do case "$f" in *.m) is_objc=1 ;; esac; done
 case "$(basename "$out")" in
-    test_*) exec cc "${args[@]}" -o "$out" -lm -lpthread ;;
+    # Prueba nativa de AppKit: no se puede compilar fuera de macOS. Se simula
+    # un ejecutable que anuncia su ejecución para comprobar que build.sh la lanza.
+    test_*) if [ $is_objc -eq 1 ]; then
+                printf '#!/bin/sh\necho "Prueba nativa simulada: %s"\n' "${srcs[*]}" > "$out"; chmod +x "$out"; exit 0
+            fi
+            exec cc "${args[@]}" -o "$out" -lm -lpthread ;;
     *) printf '#ARCHS=x86_64 arm64\n# binario simulado de: %s\n' "${srcs[*]}" > "$out"; chmod +x "$out" ;;
 esac

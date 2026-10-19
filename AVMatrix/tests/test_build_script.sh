@@ -27,6 +27,7 @@ check "se generan driver, app y avmctl" [ -f "$OUT/mac/AVMatrix.driver/Contents/
 check "el driver incluye avm_rate.c" grep -q "avm_rate.c" "$OUT/mac/AVMatrix.driver/Contents/MacOS/AVMatrix"
 check "la app incluye avm_names.c (nombres de canales)" grep -q "avm_names.c" "$OUT/mac/AV Matrix.app/Contents/MacOS/AVMatrix"
 check "se ejecutan las pruebas de nombres" grep -q "^Nombres: [0-9]* comprobaciones correctas, 0 fallos" "$LOG"
+check "se compila y ejecuta la prueba nativa del panel de nombres (con la app)" grep -q "^Prueba nativa simulada: tests/test_rename_ui.m .*avm_names.c" "$LOG"
 APPR="$OUT/mac/AV Matrix.app/Contents"
 check "el icono se incluye en la app" cmp -s "$OUT/test.icns" "$APPR/Resources/AVMatrix.icns"
 check "Info.plist de la app declara CFBundleIconFile" grep -q "<key>CFBundleIconFile</key>" "$APPR/Info.plist"

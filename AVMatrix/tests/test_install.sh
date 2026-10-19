@@ -320,5 +320,57 @@ check "icono no declarado: nada cambia" [ "$(snapshot)" = "$before" ]
 check "icono no declarado: el motivo es el icono" file_has "$T/out" "no declara CFBundleIconFile"
 rm -rf "$T"
 
+# A. --app-only: solo la app; el driver y avmctl no se tocan y coreaudiod nunca se reinicia.
+app_version()    { grep -m1 "version" "$T/inst/Applications/AV Matrix.app/Contents/MacOS/AVMatrix" | sed 's/.*version=//'; }
+driver_version() { grep -m1 "version" "$T/inst/HAL/AVMatrix.driver/Contents/MacOS/AVMatrix" | sed 's/.*version=//'; }
+snapshot_except_app() { snapshot | grep -v "^./Applications/"; }
+
+# A1. Actualización normal de la app (sin --no-restart): conserva el icono instalado.
+new_env
+MAKE_ICON=antonio make_dist "$T/dist" v1 adhoc adhoc adhoc
+INSTALL_ARGS="--no-restart" run_install || echo "no se pudo preparar v1 con icono"
+: > "$T/signlog"; before_rest=$(snapshot_except_app)
+make_dist "$T/dist" v2 adhoc adhoc adhoc
+INSTALL_ARGS="--app-only" run_install; rc=$?
+check "solo app: termina bien" [ $rc -eq 0 ]
+check "solo app: la app queda en v2" [ "$(app_version)" = v2 ]
+check "solo app: el driver sigue en v1" [ "$(driver_version)" = v1 ]
+check "solo app: avmctl sigue en v1" [ "$(installed_version)" = v1 ]
+check "solo app: driver y avmctl byte a byte idénticos" [ "$(snapshot_except_app)" = "$before_rest" ]
+check "solo app: nunca reinicia coreaudiod" [ ! -s "$T/restarts" ]
+check "solo app: conserva el icono instalado" icon_is antonio
+check "solo app: respalda solo la app" bash -c "[ -d '$T/backups'/*/'AV Matrix.app' ] && [ ! -e '$T/backups'/*/AVMatrix.driver ] && [ ! -e '$T/backups'/*/avmctl ]"
+check "solo app: sin restos de staging" no_leftovers
+check "solo app: lo indica" file_has "$T/out" "no se reinició coreaudiod"
+rm -rf "$T"
+
+# A2. El paquete solo trae la app: suficiente para --app-only.
+new_env; seed_v1
+make_dist "$T/dist" v2 adhoc adhoc adhoc
+rm -rf "$T/dist/AVMatrix.driver" "$T/dist/avmctl"
+INSTALL_ARGS="--app-only" run_install; rc=$?
+check "solo app sin driver en el paquete: termina bien" [ $rc -eq 0 ]
+check "solo app sin driver en el paquete: app v2, driver v1" [ "$(app_version)" = v2 ] && [ "$(driver_version)" = v1 ]
+rm -rf "$T"
+
+# A3. App con firma inválida: no cambia nada.
+new_env; seed_v1; before=$(snapshot)
+make_dist "$T/dist" v2 adhoc invalid adhoc
+INSTALL_ARGS="--app-only" run_install; rc=$?
+check "solo app con firma inválida: devuelve error" [ $rc -ne 0 ]
+check "solo app con firma inválida: nada cambia" [ "$(snapshot)" = "$before" ]
+check "solo app con firma inválida: no reinicia coreaudiod" [ ! -s "$T/restarts" ]
+rm -rf "$T"
+
+# A4. Fallo al sustituir la app: se restaura la anterior y no se reinicia nada.
+new_env; seed_v1; before=$(snapshot)
+make_dist "$T/dist" v2 adhoc adhoc adhoc
+INSTALL_ARGS="--app-only" run_install AVM_TEST_FAIL_AT=swap:app; rc=$?
+check "solo app con fallo en la sustitución: devuelve error" [ $rc -ne 0 ]
+check "solo app con fallo en la sustitución: todo queda como antes" [ "$(snapshot)" = "$before" ]
+check "solo app con fallo en la sustitución: no reinicia coreaudiod" [ ! -s "$T/restarts" ]
+check "solo app con fallo en la sustitución: sin restos" no_leftovers
+rm -rf "$T"
+
 echo "Instalador: $PASS comprobaciones correctas, $FAIL fallos"
 [ "$FAIL" -eq 0 ]

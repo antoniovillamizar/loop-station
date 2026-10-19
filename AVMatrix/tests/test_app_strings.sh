@@ -24,5 +24,12 @@ check "los alias se guardan en forma compuesta NFC (tildes)" grep -q "precompose
 check "la ruta del archivo de nombres se pasa en UTF-8" grep -q "NamesFilePath().fileSystemRepresentation" "$APP"
 check "un alias nunca se usa como cadena de formato" bash -c '! grep -nE "stringWithFormat:(ChannelAlias|RxChannelName|TxChannelName|a)[,)]" <<< "$1" | grep -q .' _ "$CODE"
 
+# Panel de nombres: sin ciclo de retención y con tamaño explícito.
+check "el panel guarda su NSPopover con referencia débil" grep -q "@property (weak) NSPopover\* popover;" "$APP"
+check "ningún controlador del panel retenido fuera del popover" bash -c '! grep -q "AVMRenameController\* renamer" "$1"' _ "$APP"
+check "el NSPopover recibe un contentSize explícito" grep -q "pop.contentSize = rc.preferredContentSize;" "$APP"
+check "el tamaño se recalcula al mostrar un error" bash -c 'grep -A4 "^- (void)showMessage:" "$1" | grep -q "updateSize"' _ "$APP"
+check "el AVMController suelta el panel al cerrarse" bash -c 'grep -A5 "^- (void)popoverDidClose:" "$1" | grep -q "self.renamePopover = nil"' _ "$APP"
+
 echo "Textos de la app: $PASS comprobaciones correctas, $FAIL fallos"
 [ $FAIL -eq 0 ]

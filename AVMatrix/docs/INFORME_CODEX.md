@@ -1,8 +1,73 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 8; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 9; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 8 — nombres personalizados de los canales (sobre `453bf79`)
+## 0. Revisión 9 — tamaño del panel de nombres y ciclo de retención (sobre `277acc5`)
+
+Codex comprobó `277acc5` en el Mac (Enter, Escape, restauración, persistencia, tildes y fallo de guardado correctos) y encontró dos problemas en el panel de nombres. Antes de modificar se hizo una copia de seguridad del proyecto en `277acc5`. **No se instaló nada ni se reinició coreaudiod.** **Solo cambia la app:** el driver y `avmctl` de `dist/` son byte a byte iguales a los de `277acc5`.
+
+**Qué se comprobó y dónde:**
+- **En Linux:** compilación cruzada de la app y de la prueba nativa (arm64 y x86_64, `-Werror`), comprobaciones estáticas, pruebas del instalador y mutaciones.
+- **En un Mac:** nada todavía. La prueba nativa `tests/test_rename_ui.m` **está escrita y compilada, pero no se ha ejecutado**: necesita AppKit. La ejecuta `scripts/build.sh`.
+
+### 0.9.1 Tamaño del panel (`App/AVMatrixApp.m`)
+
+- **Ancho fijo** `kRenameW` = 420 pt y **tamaño explícito** antes de mostrar el panel:
+  - `updateSize` (`:764`) calcula `fittingSize`, fija el `frame` de la vista, `preferredContentSize` y `popover.contentSize`;
+  - `AVMMakeRenamePopover` (`:855`) carga la vista y asigna `pop.contentSize = rc.preferredContentSize` después de `contentViewController`. Así no queda en 0 × 0.
+- **Mensaje de error sin recortes:**
+  - `wrappingLabelWithString` con `preferredMaxLayoutWidth` y ancho igual al contenido (`:733`): un mensaje largo pasa a varias líneas;
+  - `showMessage:` (`:778`) lo muestra y **recalcula el tamaño**: el panel crece en alto, nunca en ancho. Lo usan los tres errores: demasiado largo, UTF-8 inválido y fallo al guardar.
+- Sin cambios en el contenido, los textos, Enter, Escape, restaurar ni el guardado y su reversión.
+
+### 0.9.2 Ciclo de retención
+
+- **Antes:** `AVMController.renamer` → controlador → `popover` (fuerte) → `contentViewController` → controlador.
+- **Ahora** (`:700`, `:884`, `:1187`):
+  - el `AVMController` retiene **el popover** (`renamePopover`) solo mientras está abierto;
+  - el popover retiene al controlador (`contentViewController`);
+  - el controlador guarda el popover con referencia **débil**;
+  - `popoverDidClose:` (el `AVMController` es el delegado) suelta el popover; se libera en la siguiente vuelta del bucle (`dispatch_async`), nunca durante una acción del propio panel (Guardar, Restaurar, Cancelar);
+  - abrir otro canal con el panel abierto cierra y suelta el anterior.
+- El bloque `onChange` captura el `AVMController` con referencia débil: el panel tampoco lo retiene.
+
+### 0.9.3 Pruebas
+
+| Prueba | Dónde | Qué comprueba |
+| --- | --- | --- |
+| `tests/test_rename_ui.m` (nueva, nativa) | Mac (sin ejecutar) | Incluye la app sin su `main` (`AVM_APP_NO_MAIN`). **Tamaño:** canales Salida 1, Música R, Entrada 8 y Envío 8: `contentSize` ≥ 300 × 100, igual al `frame` de la vista y ≥ `fittingSize`. **Error:** alias de más de 32 caracteres rechazado (no cambia el nombre), el panel crece, el mensaje cabe entero (alto necesario ≤ alto del marco y dentro de la vista); también con el mensaje de fallo al guardar y uno de 300 caracteres; el ancho no cambia. **Retención sin mostrar:** 50 paneles creados y soltados, 0 vivos. **Mostrado en pantalla** a través del `AVMController`: 20 aperturas alternando Cancelar/Escape, cierre exterior y abrir otro canal con uno abierto; todos visibles, con tamaño correcto en su ventana y liberados al final; el `AVMController` tampoco queda retenido. `AVM_UI_NO_WINDOW=1` omite la parte en pantalla. No escribe en el archivo de nombres |
+| `tests/test_app_strings.sh` (+5, 17) | Linux | `popover` débil, ningún controlador retenido aparte, `contentSize` explícito, `showMessage:` recalcula, `popoverDidClose:` suelta el panel. Mutaciones (`strong`; sin `contentSize`): detectadas |
+| `tests/test_build_script.sh` (+1, 20) | Linux | `build.sh` compila la prueba nativa con la app y la ejecuta |
+| `tests/test_install.sh` (+19, 102) | Linux | Nuevo `install.sh --app-only` (ver abajo). Mutaciones (instalar los tres componentes; no salir antes del reinicio): 6 y 1 fallos |
+
+### 0.9.4 Actualizar solo la app: `install.sh --app-only`
+
+- Valida, prepara, respalda y sustituye **solo** `/Applications/AV Matrix.app`, con la misma transacción y el mismo rollback.
+- **Nunca reinicia coreaudiod.** No necesita el driver ni `avmctl` en el paquete.
+- Conserva el icono instalado (misma lógica de firma: nunca degrada un Developer ID).
+- Los nombres de los canales no se tocan: están en Application Support.
+- Probado: el driver y `avmctl` quedan byte a byte iguales, el respaldo contiene solo la app, una firma inválida no cambia nada y un fallo en la sustitución restaura la app anterior.
+
+**Resultados (Linux):**
+
+| Suite | Resultado |
+| --- | --- |
+| Núcleo | 122/122 |
+| Frecuencia | 115/115 |
+| Medidores | 117/117 |
+| Nombres | 51/51 |
+| Instalador | 102/102 |
+| `build.sh` | 20/20 |
+| Textos | 17/17 |
+
+ASan, UBSan y TSan sin avisos. Compilación cruzada sin avisos.
+
+**Pendiente en el Mac:**
+- `bash scripts/build.sh`, que ejecuta `test_rename_ui`: debe acabar con «Panel de nombres: … 0 fallos».
+- Ver el panel en pantalla, con un error visible.
+- `sudo bash scripts/install.sh --app-only`.
+
+## 0ter. Revisión 8 — nombres personalizados de los canales (sobre `453bf79`)
 
 Encargo: poder renombrar los 34 canales (Smaart Salidas 1–8, LISTENTO Retornos 1–8, Música L/R, Smaart Entradas 1–8 y LISTENTO Envíos 1–8). Antes de modificar se hizo una copia de seguridad del proyecto en `453bf79`. **No se instaló nada ni se reinició coreaudiod.** **El driver no cambia:** los nombres son solo de la app.
 
