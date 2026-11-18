@@ -95,6 +95,9 @@ cross:
 	    -o $(BUILD)/cross/test_bridge_io_$$a -x objective-c tests/test_bridge_io.m -x none Client/avm_bridge_core.c Client/avm_client.c Driver/src/avm_core.c \
 	    -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
+	    -o $(BUILD)/cross/test_window_close_$$a tests/test_window_close.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+	    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation || exit 1; \
+	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
 	    -o $(BUILD)/cross/test_mixer_ui_$$a tests/test_mixer_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
 	    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation || exit 1; \
 	done

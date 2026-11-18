@@ -127,6 +127,8 @@ La configuración queda en el preset de medición, que es la que se usará con L
 
 ## Actualizar solo la app (sin tocar el driver ni cortar el audio)
 
+> **Revisión 16:** solo cambia la app (cierre de la ventana principal). Si ya tienes instalado el driver de la revisión 14 o 15, actualiza con `--app-only`. Comprueba: con un puente activo, cierra la ventana, espera unos segundos y reábrela desde el Dock o con ⌘0: la app no debe cerrarse y el puente debe seguir «Conectado».
+
 Cuando una versión solo cambia la app (como la revisión 9, con el panel de nombres corregido):
 
 1. Cierra la app **AV Matrix** (no hace falta cerrar Smaart ni LISTENTO: el audio no se corta).

@@ -1905,7 +1905,7 @@ static void BridgeNotify(void* ctx);
     // Puentes: si el hilo de IO vio buffers con otra forma, se reconstruyen aquí.
     if (self.danteRow.bridge) avm_bridge_poll(self.danteRow.bridge);
     if (self.evoRow.bridge) avm_bridge_poll(self.evoRow.bridge);
-    BOOL mainVisible = (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+    BOOL mainVisible = self.window.visible && (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
     BOOL mixerVisible = self.mixer.window.visible && (self.mixer.window.occlusionState & NSWindowOcclusionStateVisible);
     if (!mainVisible && !mixerVisible) return;
     avm_meter_reading s[AVM_NUM_SOURCES], d[AVM_NUM_DESTS];
@@ -1938,8 +1938,15 @@ static void BridgeNotify(void* ctx);
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)app hasVisibleWindows:(BOOL)visible
 {
     (void)app;
-    if (!visible) [self.window makeKeyAndOrderFront:nil];
+    if (!visible) [self showMainWindow:nil];
     return YES;
+}
+
+// Reabre la ventana principal (la misma: cerrarla solo la oculta).
+- (void)showMainWindow:(id)sender
+{
+    (void)sender;
+    [self.window makeKeyAndOrderFront:nil];
 }
 
 - (BOOL)anyBridgeEnabled
@@ -2055,6 +2062,8 @@ static void BridgeNotify(void* ctx)
     NSMenuItem* appItem = [[NSMenuItem alloc] init];
     [bar addItem:appItem];
     NSMenu* appMenu = [[NSMenu alloc] init];
+    NSMenuItem* showMain = [appMenu addItemWithTitle:@"Mostrar ventana de AV Matrix" action:@selector(showMainWindow:) keyEquivalent:@"0"];
+    showMain.target = self;
     [appMenu addItemWithTitle:@"Salir de AV Matrix" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
 
@@ -2147,6 +2156,10 @@ static void BridgeNotify(void* ctx)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
     self.window.title = @"AV Matrix";
+    // Bajo ARC, la ventana la retiene el controlador: cerrarla no debe liberarla
+    // (si no, el temporizador de los medidores consultaría una ventana liberada).
+    // Cerrar solo la oculta; los puentes siguen activos y el Dock la reabre.
+    self.window.releasedWhenClosed = NO;
     self.window.delegate = self;
     NSView* content = self.window.contentView;
     [content addSubview:self.root];

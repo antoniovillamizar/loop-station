@@ -1,8 +1,44 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 15; revisión 1 del 18 de octubre; revisiones 14 y 15 del 18 de noviembre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 16; revisión 1 del 18 de octubre; revisiones 14 a 16 del 18 de noviembre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 15 — puentes: buffers validados en el callback y reconstrucción por cambios de configuración (sobre `fd355d7`)
+## 0. Revisión 16 — cierre de la ventana principal (sobre `5245f05`)
+
+Codex reprodujo un cierre inesperado de la app en `5245f05`:
+- `AVMController.buildWindow` no ponía `releasedWhenClosed = NO`. Bajo ARC, al cerrar la ventana principal, el controlador se quedaba con un puntero a una ventana liberada.
+- El temporizador de los medidores llamaba a `pollMeters`, que consultaba `self.window` y fallaba (reproducido con `NSZombieEnabled`; con la línea añadida, pasa).
+
+Antes de modificar se hizo una copia de seguridad del proyecto en `5245f05`. **No se instaló nada ni se reinició coreaudiod.**
+
+**Actualización SOLO DE LA APP:** el driver y `avmctl` de `dist/` son idénticos a los de `5245f05`. Se instala con `sudo bash scripts/install.sh --app-only`.
+
+**Qué se comprobó y dónde:**
+- **En Linux:** comprobaciones estáticas (con mutación), todas las suites y la compilación cruzada de la app y de la prueba nativa nueva.
+- **En un Mac:** nada todavía. `tests/test_window_close.m` está escrita y compilada, **sin ejecutar**; `build.sh` la ejecuta con `NSZombieEnabled=YES`.
+
+### 0.16.1 Corrección (`App/AVMatrixApp.m`)
+
+- **`buildWindow`:** `self.window.releasedWhenClosed = NO`. Cerrar la ventana solo la oculta; el controlador conserva la misma ventana. Las ventanas del mixer y del manual ya lo tenían.
+- **`pollMeters`:** considera visible la ventana principal solo si está abierta (`visible`) además de no tapada.
+- **Reabrir:** clic en el Dock (`applicationShouldHandleReopen`) o el menú nuevo **«Mostrar ventana de AV Matrix»** (⌘0), que reabren la misma ventana con la matriz, los puentes y su estado.
+- **Puentes:** no cambian. Con un puente activo, cerrar la ventana no cierra la app y el envío o la recepción continúan. Sin puentes activos, cerrar la ventana cierra la app, como antes.
+
+### 0.16.2 Pruebas
+
+| Prueba | Tipo | Qué comprueba |
+| --- | --- | --- |
+| `tests/test_window_close.m` (nueva, nativa, 12) | **Mac (sin ejecutar)**, con `NSZombieEnabled=YES` | `releasedWhenClosed == NO`. Con un puente activado (dispositivo inexistente, sin audio) y el temporizador de los medidores en marcha: **cerrar** la ventana; dejar correr el temporizador unos 0,6 s (unas 9 llamadas a `pollMeters`) y 20 llamadas directas; la ventana sigue viva (referencia débil no nula) y oculta; el temporizador sigue válido; el puente sigue activado en el mismo estado; la app no se cierra. **Reabrir** con el Dock: la misma ventana, con la matriz y los puentes. Segundo ciclo: cerrar y reabrir desde el menú. Sin puentes activos, cerrar la ventana cierra la app |
+| `tests/test_app_strings.sh` (+3, 39) | Linux (estática) | `releasedWhenClosed = NO` en `buildWindow`; todas las ventanas de la app lo tienen; menú «Mostrar ventana de AV Matrix». Mutación (quitar la línea, como en `5245f05`): 2 fallos |
+| `tests/test_build_script.sh` (+2, 37) | Linux | `build.sh` compila y ejecuta la prueba nueva, con `NSZombieEnabled=YES` |
+
+**Resultados (Linux):** todas las suites sin fallos (textos 39/39, `build.sh` 37/37, puentes 82/82 y 24/24, y las demás como en la revisión 15). Sanitizers sin avisos. Compilación cruzada sin avisos.
+
+**Pendiente en el Mac:**
+- `bash scripts/build.sh`: debe acabar con «Cierre de la ventana: 12 comprobaciones correctas, 0 fallos».
+- `sudo bash scripts/install.sh --app-only`.
+- A mano: con un puente activo, cerrar la ventana, esperar, reabrirla desde el Dock y comprobar que el puente sigue «Conectado».
+
+## 0decies. Revisión 15 — puentes: buffers validados en el callback y reconstrucción por cambios de configuración (sobre `fd355d7`)
 
 Codex revisó `fd355d7` antes de instalar y encontró dos problemas. Antes de modificar se hizo una copia de seguridad del proyecto en `fd355d7`. **No se instaló nada ni se reinició coreaudiod.**
 

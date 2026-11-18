@@ -54,5 +54,10 @@ check "medidores también durante el arrastre (modos comunes)" grep -q "addTimer
 check "restaurar pide confirmación" bash -c 'grep -A4 "^- (void)restoreUnity:(id)sender" "$1" | grep -q "NSAlert"' _ "$APP"
 check "la app escucha los cambios del mixer en el driver" grep -q "AVM_PROPERTY_MIXER" "$APP"
 
+# Cierre de la ventana principal (revisión 16).
+check "la ventana principal no se libera al cerrarse (ARC)" bash -c 'sed -n "/^- (void)buildWindow/,/^}/p" "$1" | grep -q "self.window.releasedWhenClosed = NO;"' _ "$APP"
+check "todas las ventanas de la app tienen releasedWhenClosed = NO" bash -c '[ $(grep -c "initWithContentRect:" "$1") -eq $(grep -c "releasedWhenClosed = NO;" "$1") ]' _ "$APP"
+check "menú «Mostrar ventana de AV Matrix»" grep -q 'addItemWithTitle:@"Mostrar ventana de AV Matrix" action:@selector(showMainWindow:)' "$APP"
+
 echo "Textos de la app: $PASS comprobaciones correctas, $FAIL fallos"
 [ $FAIL -eq 0 ]

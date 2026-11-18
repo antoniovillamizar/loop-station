@@ -112,6 +112,12 @@ clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-ver
     -o "$OUT/test_mixer_ui" tests/test_mixer_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
     -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation
 "$OUT/test_mixer_ui"
+# Prueba nativa del cierre de la ventana principal (con NSZombieEnabled: un
+# acceso a una ventana liberada aborta la prueba).
+clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
+    -o "$OUT/test_window_close" tests/test_window_close.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation
+NSZombieEnabled=YES "$OUT/test_window_close"
 # Prueba nativa del callback real del puente (AudioBufferList), con ASan.
 clang -std=c11 -x objective-c -O1 -g -fsanitize=address -fno-sanitize-recover=all -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
     -o "$OUT/test_bridge_io" tests/test_bridge_io.m Client/avm_bridge_core.c Client/avm_client.c Driver/src/avm_core.c \
