@@ -5,8 +5,9 @@
 // dispositivo, dirección y número de canal con una clave estable:
 //
 //   smaart.out.1-8     Smaart Salidas         listento.out.1-8   LISTENTO Retornos
-//   music.out.1-2      Música L / R           smaart.in.1-8      Smaart Entradas
-//   listento.in.1-8    LISTENTO Envíos
+//   music.out.1-2      Música L / R           evo.in.1-4         EVO 1-4 (entradas USB)
+//   smaart.in.1-8      Smaart Entradas        listento.in.1-8    LISTENTO Envíos
+//   dante.out.1-2      Dante L / R (hacia Dante Virtual Soundcard)
 //
 // Las claves no deben cambiar nunca: son las que se guardan en disco y las que
 // permiten conservar los nombres al actualizar la aplicación.
@@ -27,7 +28,7 @@
 extern "C" {
 #endif
 
-#define AVM_NAMES_COUNT        (AVM_NUM_SOURCES + AVM_NUM_DESTS)   // 34
+#define AVM_NAMES_COUNT        (AVM_NUM_SOURCES + AVM_NUM_DESTS)   // 40
 #define AVM_ALIAS_MAX_CHARS    32      // caracteres (puntos de código), no bytes
 #define AVM_ALIAS_MAX_BYTES    (AVM_ALIAS_MAX_CHARS * 4)
 
@@ -43,7 +44,7 @@ typedef enum {
     AVM_NAME_BAD_INDEX
 } avm_name_status;
 
-// Índices: fuentes 0..17 (igual que la matriz), destinos 18..33.
+// Índices: fuentes 0..21 (igual que la matriz), destinos 22..39.
 static inline int avm_names_src_index(int src) { return src; }
 static inline int avm_names_dst_index(int dst) { return AVM_NUM_SOURCES + dst; }
 
@@ -55,9 +56,9 @@ const char* avm_names_key(int idx);
 int avm_names_index_of_key(const char* key);
 
 // Nombre original corto del canal, sin dispositivo: "Salida 3", "Retorno 1",
-// "Música L", "Entrada 8", "Envío 2".
+// "Música L", "EVO 3", "Entrada 8", "Envío 2", "Dante R".
 void avm_names_default(int idx, char* buf, size_t len);
-// Número visible del canal: "1".."8", o "L"/"R" para Música.
+// Número visible del canal: "1".."8", "1".."4" para la EVO, o "L"/"R" para Música y Dante.
 void avm_names_number(int idx, char* buf, size_t len);
 
 // Normaliza un alias: valida UTF-8, convierte tabuladores y saltos de línea en

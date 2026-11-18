@@ -13,8 +13,25 @@ La tarjeta **transporta y enruta audio**, y su mixer solo **atenúa** (de 0 dB a
 | **AV Matrix Smaart** | 8 (`Entrada 1-8`) | 8 (`Salida 1-8`) | El único dispositivo que se selecciona en Smaart, para enviar y recibir a la vez |
 | **AV Matrix LISTENTO** | 8 (`Envío 1-8`) | 8 (`Retorno 1-8`) | El que se selecciona en LISTENTO: captura el envío y reproduce el retorno |
 | **AV Matrix Música** | — | 2 (`Música L/R`) | Salida del sistema para Apple Music, Spotify o Tidal, o salida de un DAW |
+| **AV Matrix Dante (puente)** | 2 (`Dante L/R`) | — | Solo para la app: el puente Dante las lee y las envía a Dante Virtual Soundcard |
+| **AV Matrix EVO (puente)** | — | 4 (`EVO 1-4`) | Solo para la app: el puente EVO escribe aquí las entradas USB de la EVO |
 
-Los tres dispositivos comparten **un solo reloj** y una frecuencia (44,1, 48 o 96 kHz). Por eso el audio pasa de uno a otro sin deriva.
+Los cinco dispositivos comparten **un solo reloj** y una frecuencia (44,1, 48 o 96 kHz). Por eso el audio pasa de uno a otro sin deriva. Los dos de puente no pueden ser dispositivos por defecto del Mac.
+
+### Puentes: Dante Virtual Soundcard y EVO (dentro de la app)
+
+| Puente | Recorrido | Controles |
+| --- | --- | --- |
+| **Dante (salida)** | Apple Music → AV Matrix Música → matriz y mixer → **Dante L/R** → Dante Virtual Soundcard (canales elegidos, por defecto 1 y 2) → consola Dante | Dispositivo, canal para L y R, Activar/Detener, estado; botón «Conectar Música L/R» |
+| **EVO (entradas)** | Entradas USB de la EVO (por defecto 1-4) → **fuentes EVO 1-4** → matriz y mixer → Smaart, LISTENTO o Dante | Dispositivo (con las entradas que expone de verdad), entrada para cada EVO 1-4, Activar/Detener, estado |
+
+- **Cómo funciona:** cada puente crea en la app un **dispositivo agregado privado** con [dispositivo puente de AV Matrix, dispositivo externo]. El **reloj es el del externo** (DVS o la EVO) y el lado de AV Matrix lleva **compensación de deriva**: CoreAudio adapta los relojes. Un IOProc copia los canales sin esperas ni memoria nueva, con un fundido de 256 muestras al arrancar. No se usa el protocolo Dante: DVS se usa como dispositivo CoreAudio. No hace falta DAW ni Loopback.
+- **Frecuencias:** deben coincidir; si no, el puente no arranca y ofrece «Igualar frecuencia». Al cambiar la frecuencia en la app, los puentes se pausan, AV Matrix cambia y se intenta poner la EVO y DVS a la misma.
+- **Desconexión:** si DVS o la EVO desaparecen, el puente se detiene de forma segura y lo muestra; al volver, se reconecta con un agregado nuevo (nunca audio viejo).
+- **Sin realimentación:** un puente nunca usa un dispositivo de AV Matrix (ni un agregado que lo contenga), y los dos puentes no pueden usar el mismo dispositivo. El puente Dante solo escribe en DVS; el puente EVO solo escribe en las fuentes EVO 1-4.
+- **Se conservan** las rutas de Smaart y LISTENTO y la referencia local Salida 1 → Entrada 8: los presets de medición no usan la EVO y conservan las rutas hacia Dante.
+- La app necesita el **permiso de micrófono** para leer el audio de los puentes, y sigue funcionando con la ventana cerrada mientras haya un puente activo.
+- La configuración se guarda en las preferencias de la app. `avmctl devices` lista los dispositivos del Mac con sus entradas, salidas y frecuencia.
 
 ### Por qué LISTENTO tiene su propio dispositivo
 

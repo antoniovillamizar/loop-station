@@ -1,5 +1,6 @@
 // Prueba nativa (solo macOS) de la ventana «Mixer»:
-//   1. dos secciones con las 34 tiras (18 entradas a la matriz, 16 salidas);
+//   1. dos secciones con las 40 tiras (22 entradas a la matriz con EVO 1-4,
+//      18 salidas con Dante L/R);
 //   2. cada tira: número, nombre personalizado, medidor, fader con lectura en dB
 //      y botón MUTE;
 //   3. el fader solo atenúa (0 dB arriba, silencio abajo) y vuelve a 0 dB con
@@ -49,11 +50,11 @@ static void test_layout(AVMMixerController* mc)
 {
     NSView* content = mc.window.contentView;
     CHECK(hasText(content, @"ENTRADAS A LA MATRIZ") && hasText(content, @"SALIDAS DE LA MATRIZ"), "dos secciones: entradas y salidas de la matriz");
-    for (NSString* g in @[ @"Smaart · Salidas", @"LISTENTO · Retornos", @"Música", @"Smaart · Entradas", @"LISTENTO · Envíos" ])
+    for (NSString* g in @[ @"Smaart · Salidas", @"LISTENTO · Retornos", @"Música", @"EVO · Entradas USB", @"Smaart · Entradas", @"LISTENTO · Envíos", @"Dante · Hacia DVS" ])
         CHECK(hasText(content, g), "grupo «%s»", g.UTF8String);
     NSMutableArray* strips = [NSMutableArray array];
     collect(content, [AVMMixerStrip class], strips);
-    CHECK(strips.count == AVM_NAMES_COUNT, "34 tiras (%lu)", (unsigned long)strips.count);
+    CHECK(strips.count == AVM_NAMES_COUNT, "40 tiras (%lu)", (unsigned long)strips.count);
 
     int complete = 0;
     for (int i = 0; i < AVM_NAMES_COUNT; i++) {
@@ -65,8 +66,20 @@ static void test_layout(AVMMixerController* mc)
                && [s.mute.title isEqualToString:@"MUTE"] && s.mute.state == NSControlStateValueOff;
         if (ok) complete++;
     }
-    CHECK(complete == AVM_NAMES_COUNT, "cada tira: número, nombre, medidor, fader a 0 dB con lectura y MUTE apagado (%d de 34)", complete);
+    CHECK(complete == AVM_NAMES_COUNT, "cada tira: número, nombre, medidor, fader a 0 dB con lectura y MUTE apagado (%d de 40)", complete);
     CHECK([[mc stripForIndex:avm_names_src_index(AVM_SRC_MUSIC_BASE + 1)].number.stringValue isEqualToString:@"R"], "Música R numerada «R»");
+    // EVO 1-4 (entradas a la matriz) y Dante L/R (salidas de la matriz).
+    int evo = 0;
+    for (int k = 0; k < AVM_EVO_CHANNELS; k++) {
+        AVMMixerStrip* st = [mc stripForIndex:avm_names_src_index(AVM_SRC_EVO_BASE + k)];
+        if ([st.number.stringValue isEqualToString:[NSString stringWithFormat:@"%d", k + 1]]
+            && [st.name.stringValue isEqualToString:[NSString stringWithFormat:@"EVO %d", k + 1]] && st.fader && st.mute) evo++;
+    }
+    CHECK(evo == 4, "tiras EVO 1-4 con número, nombre, fader y MUTE (%d de 4)", evo);
+    AVMMixerStrip* dl = [mc stripForIndex:avm_names_dst_index(AVM_DST_DANTE_BASE)];
+    AVMMixerStrip* dr = [mc stripForIndex:avm_names_dst_index(AVM_DST_DANTE_BASE + 1)];
+    CHECK([dl.number.stringValue isEqualToString:@"L"] && [dr.number.stringValue isEqualToString:@"R"]
+          && [dl.name.stringValue isEqualToString:@"Dante L"], "tiras Dante L/R");
     NSButton* mute = [mc stripForIndex:0].mute;
     CHECK(NSWidth(mute.frame) >= 40 && NSHeight(mute.frame) >= 20, "botón MUTE de tamaño claro (%.0f×%.0f)", NSWidth(mute.frame), NSHeight(mute.frame));
 
@@ -146,6 +159,16 @@ static void test_controls(AVMMixerController* mc)
     a.fader.doubleValue = 1.0; [mc faderMoved:a.fader];
     CHECK([mc mixer].src_gain[AVM_SRC_SMAART_BASE + 1] == 1.0f, "fader de vuelta a 0 dB");
 
+    // Volumen y MUTE de EVO 2 (fuente) y Dante R (destino).
+    AVMMixerStrip* e2 = [mc stripForIndex:avm_names_src_index(AVM_SRC_EVO_BASE + 1)];
+    AVMMixerStrip* dR = [mc stripForIndex:avm_names_dst_index(AVM_DST_DANTE_BASE + 1)];
+    e2.fader.doubleValue = 0.5; [mc faderMoved:e2.fader];
+    dR.mute.state = NSControlStateValueOn; [mc muteToggled:dR.mute];
+    mx = [mc mixer];
+    CHECK(mx.src_gain[AVM_SRC_EVO_BASE + 1] == 0.125f && mx.dst_mute[AVM_DST_DANTE_BASE + 1] == 1, "volumen de EVO 2 y MUTE de Dante R");
+    e2.fader.doubleValue = 1.0; [mc faderMoved:e2.fader];
+    dR.mute.state = NSControlStateValueOff; [mc muteToggled:dR.mute];
+
     // Silenciar todos y restaurar.
     b.fader.doubleValue = 0.6; [mc faderMoved:b.fader];
     [mc muteAll:nil];
@@ -153,11 +176,11 @@ static void test_controls(AVMMixerController* mc)
     int allMuted = 1;
     for (int i = 0; i < AVM_NUM_SOURCES; i++) if (!mx.src_mute[i]) allMuted = 0;
     for (int d = 0; d < AVM_NUM_DESTS; d++) if (!mx.dst_mute[d]) allMuted = 0;
-    CHECK(allMuted, "«Silenciar todos»: los 34 canales en MUTE");
+    CHECK(allMuted, "«Silenciar todos»: los 40 canales en MUTE");
     CHECK(mx.dst_gain[AVM_DST_LINK_BASE + 3] == avm_fader_gain_from_pos(0.6), "«Silenciar todos» conserva los volúmenes");
     int red = 0;
     for (int i = 0; i < AVM_NAMES_COUNT; i++) if ([mc stripForIndex:i].mute.state == NSControlStateValueOn) red++;
-    CHECK(red == AVM_NAMES_COUNT, "los 34 botones MUTE encendidos");
+    CHECK(red == AVM_NAMES_COUNT, "los 40 botones MUTE encendidos");
     [mc restoreUnityConfirmed];
     mx = [mc mixer];
     CHECK(avm_mixer_is_unity(&mx), "«Restaurar 0 dB y quitar mutes»: todo a 0 dB sin MUTE");
@@ -166,7 +189,7 @@ static void test_controls(AVMMixerController* mc)
         AVMMixerStrip* s = [mc stripForIndex:i];
         if ([s.gainLabel.stringValue isEqualToString:@"0.0 dB"] && s.mute.state == NSControlStateValueOff && s.fader.doubleValue == 1.0) labels++;
     }
-    CHECK(labels == AVM_NAMES_COUNT, "las 34 tiras muestran 0 dB sin MUTE");
+    CHECK(labels == AVM_NAMES_COUNT, "las 40 tiras muestran 0 dB sin MUTE");
     CHECK(avm_mixer_is_valid(&mx), "los ajustes enviados son siempre válidos para el driver");
 }
 

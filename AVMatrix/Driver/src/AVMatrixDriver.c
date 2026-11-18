@@ -5,6 +5,12 @@
 //   "AV Matrix Smaart"    8 entradas + 8 salidas   (el que se selecciona en Smaart)
 //   "AV Matrix LISTENTO"  8 entradas + 8 salidas   (el que se selecciona en LISTENTO)
 //   "AV Matrix Música"    2 salidas                (salida del sistema / Apple Music / DAW)
+//   "AV Matrix Dante (puente)"  2 entradas         (Dante L/R; las lee el puente de la app hacia DVS)
+//   "AV Matrix EVO (puente)"    4 salidas          (EVO 1-4; las escribe el puente de la app desde la EVO)
+//
+// Los dos dispositivos «puente» solo los usa la app AV Matrix: no pueden ser
+// dispositivos por defecto del sistema. No reutilizan canales de Smaart,
+// LISTENTO ni Música.
 //
 // Las salidas de los tres son fuentes de la matriz; las entradas de Smaart y de
 // LISTENTO son destinos. Ver avm_core.h. La matriz se lee y se escribe mediante
@@ -65,21 +71,25 @@ enum {
     kObj_Str_Link_Out    = 7,
     kObj_Dev_Music       = 8,
     kObj_Str_Music_Out   = 9,
-    kObj_Max             = 10
+    kObj_Dev_Dante       = 10,
+    kObj_Str_Dante_In    = 11,
+    kObj_Dev_Evo         = 12,
+    kObj_Str_Evo_Out     = 13,
+    kObj_Max             = 14
 };
 
-#define kAVM_NumDevices 3
+#define kAVM_NumDevices 5
 
 typedef struct {
     AudioObjectID   device;
     AudioObjectID   inStream;     // 0 si no tiene entradas
-    AudioObjectID   outStream;
+    AudioObjectID   outStream;    // 0 si no tiene salidas
     const char*     name;
     const char*     uid;
     const char*     modelUID;
     UInt32          inChannels;
     UInt32          outChannels;
-    avm_src_group   srcGroup;     // a qué fuentes escriben sus salidas
+    int             srcGroup;     // a qué fuentes escriben sus salidas (-1: ninguna)
     int             dstGroup;     // de qué destinos leen sus entradas (-1: ninguno)
     Boolean         canBeDefaultOutput;
     const char*     inChannelName;   // "%u" se sustituye por el número de canal
@@ -99,6 +109,14 @@ static const AVM_DeviceDesc kDevices[kAVM_NumDevices] = {
       "AV Matrix Música", "AVMatrix_Music_UID", "AVMatrix_Model_Stereo",
       0, 2, AVM_SRC_GROUP_MUSIC, -1, true,
       NULL, "Música %u" },
+    { kObj_Dev_Dante, kObj_Str_Dante_In, 0,
+      "AV Matrix Dante (puente)", "AVMatrix_Dante_UID", "AVMatrix_Model_Bridge",
+      2, 0, -1, AVM_DST_GROUP_DANTE, false,
+      "Dante %u", NULL },
+    { kObj_Dev_Evo, 0, kObj_Str_Evo_Out,
+      "AV Matrix EVO (puente)", "AVMatrix_EVO_UID", "AVMatrix_Model_Bridge",
+      0, 4, AVM_SRC_GROUP_EVO, -1, false,
+      NULL, "EVO %u" },
 };
 
 // Acciones de cambio de configuración: [tipo 8 bits][generación 24 bits][valor 32 bits].
@@ -211,7 +229,7 @@ static int AVM_StreamIndex(AudioObjectID obj, bool* outIsInput)
 {
     for (int i = 0; i < kAVM_NumDevices; i++) {
         if (kDevices[i].inStream != 0 && kDevices[i].inStream == obj) { if (outIsInput) *outIsInput = true; return i; }
-        if (kDevices[i].outStream == obj) { if (outIsInput) *outIsInput = false; return i; }
+        if (kDevices[i].outStream != 0 && kDevices[i].outStream == obj) { if (outIsInput) *outIsInput = false; return i; }
     }
     return -1;
 }
@@ -360,9 +378,11 @@ static void AVM_LoadState(void)
 
     CFPropertyListRef v = NULL;
     if (gHost->CopyFromStorage(gHost, CFSTR("matrix"), &v) == 0 && v != NULL) {
-        if (CFGetTypeID(v) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)v) == (CFIndex)sizeof(avm_matrix)) {
-            avm_matrix m;
-            memcpy(m.cell, CFDataGetBytePtr((CFDataRef)v), sizeof(m.cell));
+        avm_matrix m;
+        // Acepta también la matriz de la versión anterior (16 x 18): las filas
+        // de Dante y las columnas de la EVO quedan vacías.
+        if (CFGetTypeID(v) == CFDataGetTypeID()
+            && avm_matrix_from_bytes(CFDataGetBytePtr((CFDataRef)v), (size_t)CFDataGetLength((CFDataRef)v), &m)) {
             if (avm_matrix_is_valid(&m))
                 avm_engine_set_matrix(gEngine, &m);
             else
@@ -921,7 +941,7 @@ static Boolean AVM_Device_HasProperty(int dev, const AudioObjectPropertyAddress*
 static UInt32 AVM_Device_StreamCount(int dev, AudioObjectPropertyScope scope)
 {
     const AVM_DeviceDesc* d = &kDevices[dev];
-    UInt32 in = d->inStream ? 1 : 0, out = 1;
+    UInt32 in = d->inStream ? 1 : 0, out = d->outStream ? 1 : 0;
     if (scope == kAudioObjectPropertyScopeInput) return in;
     if (scope == kAudioObjectPropertyScopeOutput) return out;
     return in + out;
@@ -933,7 +953,7 @@ static UInt32 AVM_Device_FillStreams(int dev, AudioObjectPropertyScope scope, Au
     UInt32 n = 0;
     if ((scope == kAudioObjectPropertyScopeGlobal || scope == kAudioObjectPropertyScopeInput) && d->inStream && n < max)
         out[n++] = d->inStream;
-    if ((scope == kAudioObjectPropertyScopeGlobal || scope == kAudioObjectPropertyScopeOutput) && n < max)
+    if ((scope == kAudioObjectPropertyScopeGlobal || scope == kAudioObjectPropertyScopeOutput) && d->outStream && n < max)
         out[n++] = d->outStream;
     return n;
 }
@@ -1010,6 +1030,8 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
             char buf[64];
             if (d->srcGroup == AVM_SRC_GROUP_MUSIC)
                 snprintf(buf, sizeof(buf), "%s", a->mElement == 1 ? "Música L" : "Música R");
+            else if (d->dstGroup == AVM_DST_GROUP_DANTE)
+                snprintf(buf, sizeof(buf), "%s", a->mElement == 1 ? "Dante L" : "Dante R");
             else if (d->device == kObj_Dev_Smaart && a->mScope == kAudioObjectPropertyScopeInput && a->mElement == 8)
                 snprintf(buf, sizeof(buf), "Entrada 8 (referencia local)");  // así la ve Smaart
             else
@@ -1090,7 +1112,7 @@ static OSStatus AVM_Device_GetPropertyData(int dev, const AudioObjectPropertyAdd
             l->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
             l->mNumberChannelDescriptions = nch;
             for (UInt32 i = 0; i < nch; i++) {
-                if (d->srcGroup == AVM_SRC_GROUP_MUSIC)
+                if (d->srcGroup == AVM_SRC_GROUP_MUSIC || d->dstGroup == AVM_DST_GROUP_DANTE)
                     l->mChannelDescriptions[i].mChannelLabel = (i == 0) ? kAudioChannelLabel_Left : kAudioChannelLabel_Right;
                 else
                     l->mChannelDescriptions[i].mChannelLabel = kAudioChannelLabel_Discrete_0 + i;
@@ -1406,7 +1428,7 @@ static OSStatus AVM_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID i
         // seguir activos: sus canales toman el volumen y el MUTE vigentes desde
         // la primera muestra, sin rampa y sin reiniciar a los demás. (El motor
         // también lo hace solo si el primer bloque no es contiguo al anterior.)
-        avm_engine_request_settle_src(gEngine, kDevices[dev].srcGroup);
+        if (kDevices[dev].srcGroup >= 0) avm_engine_request_settle_src(gEngine, (avm_src_group)kDevices[dev].srcGroup);
         if (kDevices[dev].dstGroup >= 0) avm_engine_request_settle_dst(gEngine, (avm_dst_group)kDevices[dev].dstGroup);
     }
     pthread_mutex_unlock(&gClockMutex);
@@ -1458,7 +1480,7 @@ static OSStatus AVM_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, Audio
     if (inOperationID == kAudioServerPlugInIOOperationReadInput)
         will = kDevices[dev].inStream != 0;
     else if (inOperationID == kAudioServerPlugInIOOperationWriteMix)
-        will = true;
+        will = kDevices[dev].outStream != 0;
     if (outWillDo) *outWillDo = will;
     if (outWillDoInPlace) *outWillDoInPlace = true;
     return 0;
@@ -1494,9 +1516,9 @@ static OSStatus AVM_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObje
         }
         avm_engine_read_metered(gEngine, (avm_dst_group)d->dstGroup, (int64_t)inIOCycleInfo->mInputTime.mSampleTime,
                                 inIOBufferFrameSize, ioMainBuffer, fmt, channels, AVM_NowNs());
-    } else if (inOperationID == kAudioServerPlugInIOOperationWriteMix && !isInput) {
+    } else if (inOperationID == kAudioServerPlugInIOOperationWriteMix && !isInput && d->srcGroup >= 0) {
         if (!active) return 0;
-        avm_engine_write_metered(gEngine, d->srcGroup, (int64_t)inIOCycleInfo->mOutputTime.mSampleTime,
+        avm_engine_write_metered(gEngine, (avm_src_group)d->srcGroup, (int64_t)inIOCycleInfo->mOutputTime.mSampleTime,
                                  inIOBufferFrameSize, ioMainBuffer, fmt, channels, AVM_NowNs());
     }
     return 0;

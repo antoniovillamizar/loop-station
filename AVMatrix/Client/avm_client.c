@@ -13,6 +13,8 @@ const char* avm_device_uid(avm_device_kind kind)
         case AVM_DEV_SMAART:   return AVM_UID_SMAART;
         case AVM_DEV_LISTENTO: return AVM_UID_LISTENTO;
         case AVM_DEV_MUSIC:    return AVM_UID_MUSIC;
+        case AVM_DEV_DANTE:    return AVM_UID_DANTE;
+        case AVM_DEV_EVO:      return AVM_UID_EVO;
         default:               return "";
     }
 }
@@ -23,6 +25,8 @@ const char* avm_device_label(avm_device_kind kind)
         case AVM_DEV_SMAART:   return "AV Matrix Smaart";
         case AVM_DEV_LISTENTO: return "AV Matrix LISTENTO";
         case AVM_DEV_MUSIC:    return "AV Matrix Música";
+        case AVM_DEV_DANTE:    return "AV Matrix Dante (puente)";
+        case AVM_DEV_EVO:      return "AV Matrix EVO (puente)";
         default:               return "";
     }
 }
@@ -235,27 +239,117 @@ void avm_source_name(int src, char* buf, size_t len)
 {
     if (src < AVM_SRC_LINK_BASE)       snprintf(buf, len, "Smaart Salida %d", src - AVM_SRC_SMAART_BASE + 1);
     else if (src < AVM_SRC_MUSIC_BASE) snprintf(buf, len, "LISTENTO Retorno %d", src - AVM_SRC_LINK_BASE + 1);
-    else                               snprintf(buf, len, "Música %s", src == AVM_SRC_MUSIC_BASE ? "L" : "R");
+    else if (src < AVM_SRC_EVO_BASE)   snprintf(buf, len, "Música %s", src == AVM_SRC_MUSIC_BASE ? "L" : "R");
+    else                               snprintf(buf, len, "EVO %d", src - AVM_SRC_EVO_BASE + 1);
 }
 
 void avm_dest_name(int dst, char* buf, size_t len)
 {
     if (dst == AVM_DST_LOCAL_REFERENCE) snprintf(buf, len, "Smaart Entrada 8 (REFERENCIA LOCAL)");
     else if (dst < AVM_DST_LINK_BASE)   snprintf(buf, len, "Smaart Entrada %d", dst - AVM_DST_SMAART_BASE + 1);
-    else                                snprintf(buf, len, "LISTENTO Envío %d", dst - AVM_DST_LINK_BASE + 1);
+    else if (dst < AVM_DST_DANTE_BASE)  snprintf(buf, len, "LISTENTO Envío %d", dst - AVM_DST_LINK_BASE + 1);
+    else                                snprintf(buf, len, "Dante %s", dst == AVM_DST_DANTE_BASE ? "L" : "R");
 }
 
 void avm_source_token(int src, char* buf, size_t len)
 {
     if (src < AVM_SRC_LINK_BASE)       snprintf(buf, len, "smaart.out.%d", src - AVM_SRC_SMAART_BASE + 1);
     else if (src < AVM_SRC_MUSIC_BASE) snprintf(buf, len, "listento.out.%d", src - AVM_SRC_LINK_BASE + 1);
-    else                               snprintf(buf, len, "music.%s", src == AVM_SRC_MUSIC_BASE ? "L" : "R");
+    else if (src < AVM_SRC_EVO_BASE)   snprintf(buf, len, "music.%s", src == AVM_SRC_MUSIC_BASE ? "L" : "R");
+    else                               snprintf(buf, len, "evo.%d", src - AVM_SRC_EVO_BASE + 1);
 }
 
 void avm_dest_token(int dst, char* buf, size_t len)
 {
-    if (dst < AVM_DST_LINK_BASE) snprintf(buf, len, "smaart.in.%d", dst - AVM_DST_SMAART_BASE + 1);
-    else                         snprintf(buf, len, "listento.in.%d", dst - AVM_DST_LINK_BASE + 1);
+    if (dst < AVM_DST_LINK_BASE)       snprintf(buf, len, "smaart.in.%d", dst - AVM_DST_SMAART_BASE + 1);
+    else if (dst < AVM_DST_DANTE_BASE) snprintf(buf, len, "listento.in.%d", dst - AVM_DST_LINK_BASE + 1);
+    else                               snprintf(buf, len, "dante.%s", dst == AVM_DST_DANTE_BASE ? "L" : "R");
+}
+
+// --- Dispositivos de audio del Mac --------------------------------------------
+
+static UInt32 avm_hw_channels(AudioObjectID id, AudioObjectPropertyScope scope)
+{
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyStreamConfiguration, scope, kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(id, &a, 0, NULL, &size) != noErr || size == 0) return 0;
+    AudioBufferList* l = (AudioBufferList*)malloc(size);
+    if (l == NULL) return 0;
+    UInt32 n = 0;
+    if (AudioObjectGetPropertyData(id, &a, 0, NULL, &size, l) == noErr)
+        for (UInt32 i = 0; i < l->mNumberBuffers; i++) n += l->mBuffers[i].mNumberChannels;
+    free(l);
+    return n;
+}
+
+static void avm_hw_string(AudioObjectID id, AudioObjectPropertySelector sel, char* buf, size_t len)
+{
+    AudioObjectPropertyAddress a = { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFStringRef s = NULL;
+    UInt32 size = sizeof(s);
+    buf[0] = 0;
+    if (AudioObjectGetPropertyData(id, &a, 0, NULL, &size, &s) == noErr && s) {
+        CFStringGetCString(s, buf, (CFIndex)len, kCFStringEncodingUTF8);
+        CFRelease(s);
+    }
+}
+
+OSStatus avm_hw_device_info(AudioObjectID id, avm_hw_device* out)
+{
+    memset(out, 0, sizeof(*out));
+    out->id = id;
+    avm_hw_string(id, kAudioDevicePropertyDeviceUID, out->uid, sizeof(out->uid));
+    if (out->uid[0] == 0) return kAudioHardwareBadDeviceError;
+    avm_hw_string(id, kAudioObjectPropertyName, out->name, sizeof(out->name));
+    out->in_channels = avm_hw_channels(id, kAudioObjectPropertyScopeInput);
+    out->out_channels = avm_hw_channels(id, kAudioObjectPropertyScopeOutput);
+    AudioObjectPropertyAddress r = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = sizeof(out->rate);
+    AudioObjectGetPropertyData(id, &r, 0, NULL, &size, &out->rate);
+    AudioObjectPropertyAddress al = { kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 alive = 0;
+    size = sizeof(alive);
+    out->alive = AudioObjectGetPropertyData(id, &al, 0, NULL, &size, &alive) == noErr && alive != 0;
+    out->is_avmatrix = strncmp(out->uid, AVM_UID_PREFIX, strlen(AVM_UID_PREFIX)) == 0;
+    return noErr;
+}
+
+int avm_list_hw_devices(avm_hw_device* out, int max)
+{
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size) != noErr) return 0;
+    UInt32 n = size / sizeof(AudioObjectID);
+    AudioObjectID* ids = (AudioObjectID*)calloc(n ? n : 1, sizeof(AudioObjectID));
+    if (ids == NULL) return 0;
+    int count = 0;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, ids) == noErr) {
+        n = size / sizeof(AudioObjectID);
+        for (UInt32 i = 0; i < n && count < max; i++)
+            if (avm_hw_device_info(ids[i], &out[count]) == noErr) count++;
+    }
+    free(ids);
+    return count;
+}
+
+OSStatus avm_hw_device_by_uid(const char* uid, avm_hw_device* out)
+{
+    if (uid == NULL || uid[0] == 0) return kAudioHardwareBadDeviceError;
+    CFStringRef u = CFStringCreateWithCString(NULL, uid, kCFStringEncodingUTF8);
+    if (u == NULL) return kAudioHardwareBadDeviceError;
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectID dev = kAudioObjectUnknown;
+    UInt32 size = sizeof(dev);
+    OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, sizeof(u), &u, &size, &dev);
+    CFRelease(u);
+    if (err != noErr || dev == kAudioObjectUnknown) return kAudioHardwareBadDeviceError;
+    return avm_hw_device_info(dev, out);
+}
+
+OSStatus avm_hw_set_rate(AudioObjectID id, Float64 rate)
+{
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    return AudioObjectSetPropertyData(id, &a, 0, NULL, sizeof(rate), &rate);
 }
 
 int avm_parse_source(const char* t)

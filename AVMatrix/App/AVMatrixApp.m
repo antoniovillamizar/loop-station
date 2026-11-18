@@ -18,11 +18,13 @@
 // Cada casilla conecta una fuente con un destino a ganancia unidad. No hay
 // ganancias, ecualización, efectos ni delay. El driver también rechaza los lazos.
 
+#import <AVFoundation/AVFoundation.h>
 #import <Cocoa/Cocoa.h>
 #include "../Client/avm_client.h"
 #include "../Client/avm_names.h"
 #include "avm_manual.h"
 #include "avm_fader.h"
+#include "../Client/avm_bridge.h"
 
 static const double kRates[3] = { 44100.0, 48000.0, 96000.0 };
 
@@ -39,10 +41,12 @@ static const AVMGroup kTxGroups[] = {
     { "Smaart",   AVM_SRC_SMAART_BASE, 8 },
     { "LISTENTO", AVM_SRC_LINK_BASE,   8 },
     { "Música",   AVM_SRC_MUSIC_BASE,  2 },
+    { "EVO",      AVM_SRC_EVO_BASE,    4 },   // entradas USB de la EVO (puente EVO)
 };
 static const AVMGroup kRxGroups[] = {
     { "Smaart",   AVM_DST_SMAART_BASE, 8 },
     { "LISTENTO", AVM_DST_LINK_BASE,   8 },
+    { "Dante",    AVM_DST_DANTE_BASE,  2 },   // hacia Dante Virtual Soundcard (puente Dante)
 };
 #define kNumTx ((int)(sizeof(kTxGroups) / sizeof(kTxGroups[0])))
 #define kNumRx ((int)(sizeof(kRxGroups) / sizeof(kRxGroups[0])))
@@ -1410,9 +1414,9 @@ static NSTextField* SectionTitle(NSString* t)
 - (void)build
 {
     self.muteAllButton = [NSButton buttonWithTitle:@"Silenciar todos" target:self action:@selector(muteAll:)];
-    self.muteAllButton.toolTip = @"Activa el MUTE de los 34 canales (los volúmenes se conservan).";
+    self.muteAllButton.toolTip = @"Activa el MUTE de todos los canales (los volúmenes se conservan).";
     self.restoreButton = [NSButton buttonWithTitle:@"Restaurar 0 dB y quitar mutes…" target:self action:@selector(restoreUnity:)];
-    self.restoreButton.toolTip = @"Pone los 34 canales a 0 dB y quita todos los MUTE (pide confirmación).";
+    self.restoreButton.toolTip = @"Pone todos los canales a 0 dB y quita todos los MUTE (pide confirmación).";
     NSButton* help = [NSButton buttonWithTitle:@"Ayuda del mixer" target:self action:@selector(showMixerHelp:)];
     for (NSButton* b in @[ self.muteAllButton, self.restoreButton, help ]) b.controlSize = NSControlSizeSmall, b.font = [NSFont systemFontOfSize:11];
     self.statusLabel = [NSTextField labelWithString:@" "];
@@ -1426,11 +1430,13 @@ static NSTextField* SectionTitle(NSString* t)
                                     note:@"El volumen actúa antes de la matriz: afecta a todos los destinos conectados a ese canal."
                                   groups:@[ [self groupTitled:@"Smaart · Salidas" first:avm_names_src_index(AVM_SRC_SMAART_BASE) count:8],
                                             [self groupTitled:@"LISTENTO · Retornos" first:avm_names_src_index(AVM_SRC_LINK_BASE) count:8],
-                                            [self groupTitled:@"Música" first:avm_names_src_index(AVM_SRC_MUSIC_BASE) count:2] ]];
+                                            [self groupTitled:@"Música" first:avm_names_src_index(AVM_SRC_MUSIC_BASE) count:2],
+                                            [self groupTitled:@"EVO · Entradas USB" first:avm_names_src_index(AVM_SRC_EVO_BASE) count:AVM_EVO_CHANNELS] ]];
     NSView* outputs = [self sectionTitled:@"SALIDAS DE LA MATRIZ"
                                      note:@"El volumen actúa después del enrutamiento y la suma: solo afecta a ese destino."
                                    groups:@[ [self groupTitled:@"Smaart · Entradas" first:avm_names_dst_index(AVM_DST_SMAART_BASE) count:8],
-                                             [self groupTitled:@"LISTENTO · Envíos" first:avm_names_dst_index(AVM_DST_LINK_BASE) count:8] ]];
+                                             [self groupTitled:@"LISTENTO · Envíos" first:avm_names_dst_index(AVM_DST_LINK_BASE) count:8],
+                                             [self groupTitled:@"Dante · Hacia DVS" first:avm_names_dst_index(AVM_DST_DANTE_BASE) count:AVM_DANTE_CHANNELS] ]];
     NSBox* sep = [[NSBox alloc] init];
     sep.boxType = NSBoxSeparator;
 
@@ -1585,7 +1591,7 @@ static NSTextField* SectionTitle(NSString* t)
     (void)sender;
     NSAlert* a = [[NSAlert alloc] init];
     a.messageText = @"¿Restaurar todos los canales a 0 dB y quitar los MUTE?";
-    a.informativeText = @"Los 34 canales vuelven a 0 dB sin MUTE: el audio pasa sin tocar. Si había canales en MUTE o atenuados, pueden sonar más fuerte de inmediato.";
+    a.informativeText = @"Todos los canales vuelven a 0 dB sin MUTE: el audio pasa sin tocar. Si había canales en MUTE o atenuados, pueden sonar más fuerte de inmediato.";
     [a addButtonWithTitle:@"Restaurar"];
     [a addButtonWithTitle:@"Cancelar"];
     __weak AVMMixerController* weakSelf = self;
@@ -1622,6 +1628,221 @@ static NSTextField* SectionTitle(NSString* t)
 
 @end
 
+static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
+{
+    NSTextField* t = [NSTextField labelWithString:text];
+    t.font = bold ? [NSFont boldSystemFontOfSize:size] : [NSFont systemFontOfSize:size];
+    return t;
+}
+
+// ---------------------------------------------------------------------------
+#pragma mark Puentes Dante y EVO
+
+// Una fila de controles por puente en la ventana principal:
+//   Dante (salida):  [dispositivo ▾]  L [1 ▾]  R [2 ▾]  [Activar]  ● estado  [Igualar frecuencia]
+//   EVO (entradas):  [dispositivo ▾]  1 [1 ▾] 2 [2 ▾] 3 [3 ▾] 4 [4 ▾]  [Activar]  ● estado
+// La configuración se guarda en las preferencias de la app (NSUserDefaults).
+
+static NSString* BridgeDefaultsKey(avm_bridge_kind k) { return k == AVM_BRIDGE_DANTE ? @"puente_dante" : @"puente_evo"; }
+
+static void BridgeConfigLoad(avm_bridge_config* c, avm_bridge_kind k)
+{
+    avm_bridge_config_default(c, k);
+    NSDictionary* d = [[NSUserDefaults standardUserDefaults] dictionaryForKey:BridgeDefaultsKey(k)];
+    if (![d isKindOfClass:[NSDictionary class]]) return;
+    NSString* uid = d[@"uid"];
+    if ([uid isKindOfClass:[NSString class]]) snprintf(c->device_uid, sizeof(c->device_uid), "%s", uid.UTF8String ?: "");
+    NSArray* ch = d[@"canales"];
+    if ([ch isKindOfClass:[NSArray class]])
+        for (int i = 0; i < avm_bridge_channels(k) && i < (int)ch.count; i++)
+            if ([ch[i] isKindOfClass:[NSNumber class]]) c->channel[i] = MAX(0, MIN(512, [ch[i] intValue]));
+    c->enabled = [d[@"activo"] isKindOfClass:[NSNumber class]] && [d[@"activo"] boolValue];
+}
+
+static void BridgeConfigSave(const avm_bridge_config* c)
+{
+    NSMutableArray* ch = [NSMutableArray array];
+    for (int i = 0; i < avm_bridge_channels(c->kind); i++) [ch addObject:@(c->channel[i])];
+    [[NSUserDefaults standardUserDefaults] setObject:@{ @"uid": UTF8(c->device_uid), @"canales": ch, @"activo": @(c->enabled) }
+                                              forKey:BridgeDefaultsKey(c->kind)];
+}
+
+@interface AVMBridgeRow : NSObject
+@property (assign) avm_bridge_kind kind;
+@property (assign) avm_bridge* bridge;
+@property (strong) NSStackView* view;
+@property (strong) NSPopUpButton* devicePopup;
+@property (strong) NSArray<NSPopUpButton*>* channelPopups;
+@property (strong) NSButton* toggle;
+@property (strong) NSTextField* dot;
+@property (strong) NSTextField* status;
+@property (assign) BOOL toggleRequested;     // la última acción fue «Activar/Detener»
+@property (strong) NSButton* matchRate;
+@property (strong) NSButton* extra;          // Dante: «Conectar Música L/R»
+@property (copy) void (^onUserChange)(AVMBridgeRow* row);
+- (instancetype)initWithKind:(avm_bridge_kind)kind target:(id)target;
+- (void)refreshDevices;
+- (void)refreshState;
+- (avm_bridge_config)configFromUI;
+@end
+
+@implementation AVMBridgeRow {
+    avm_hw_device _devs[64];
+    int _ndevs;
+}
+
+- (instancetype)initWithKind:(avm_bridge_kind)kind target:(id)target
+{
+    if ((self = [super init])) {
+        _kind = kind;
+        BOOL dante = kind == AVM_BRIDGE_DANTE;
+        NSTextField* title = Label(dante ? @"Dante (salida):" : @"EVO (entradas):", 11, YES);
+        title.toolTip = dante ? @"Envía Dante L/R de la matriz a Dante Virtual Soundcard (sin DAW ni Loopback)."
+                              : @"Recibe las entradas USB de la EVO como fuentes EVO 1-4 de la matriz.";
+        _devicePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+        _devicePopup.target = self;
+        _devicePopup.action = @selector(userChanged:);
+        _devicePopup.toolTip = dante ? @"Dispositivo de salida: Dante Virtual Soundcard." : @"Dispositivo de entrada: la EVO.";
+        [_devicePopup.widthAnchor constraintLessThanOrEqualToConstant:230].active = YES;
+        NSMutableArray* views = [NSMutableArray arrayWithObjects:title, _devicePopup, nil];
+        NSMutableArray* pops = [NSMutableArray array];
+        for (int k = 0; k < avm_bridge_channels(kind); k++) {
+            NSString* lbl = dante ? (k == 0 ? @"L" : @"R") : [NSString stringWithFormat:@"%d", k + 1];
+            NSTextField* l = Label(lbl, 11, YES);
+            l.toolTip = dante ? [NSString stringWithFormat:@"Canal de DVS que recibe Dante %@", lbl]
+                              : [NSString stringWithFormat:@"Entrada de la EVO que llega a la fuente EVO %@", lbl];
+            NSPopUpButton* p = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+            p.target = self;
+            p.action = @selector(userChanged:);
+            p.toolTip = l.toolTip;
+            [views addObject:l];
+            [views addObject:p];
+            [pops addObject:p];
+        }
+        _channelPopups = pops;
+        _toggle = [NSButton buttonWithTitle:@"Activar" target:self action:@selector(togglePressed:)];
+        _dot = Label(@"●", 13, NO);
+        _status = Label(@" ", 11, NO);
+        _status.lineBreakMode = NSLineBreakByTruncatingTail;
+        [_status setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        _matchRate = [NSButton buttonWithTitle:@"Igualar frecuencia" target:self action:@selector(matchRatePressed:)];
+        _matchRate.toolTip = @"Pone el dispositivo externo a la frecuencia de AV Matrix.";
+        _matchRate.hidden = YES;
+        [views addObjectsFromArray:@[ _toggle, _dot, _status, _matchRate ]];
+        if (dante) {
+            _extra = [NSButton buttonWithTitle:@"Conectar Música L/R" target:target action:@selector(connectMusicToDante:)];
+            _extra.toolTip = @"Conecta Música L -> Dante L y Música R -> Dante R en la matriz (no cambia nada más).";
+            [views addObject:_extra];
+        }
+        for (NSView* v in views)
+            if ([v isKindOfClass:[NSControl class]] && ![v isKindOfClass:[NSTextField class]]) {
+                ((NSControl*)v).controlSize = NSControlSizeSmall;
+                ((NSControl*)v).font = [NSFont systemFontOfSize:11];
+            }
+        _view = [NSStackView stackViewWithViews:views];
+        _view.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        _view.spacing = 5;
+    }
+    return self;
+}
+
+// Rellena la lista de dispositivos: los que tienen salidas (Dante) o entradas
+// (EVO), nunca los de AV Matrix. El elegido se conserva aunque no esté.
+- (void)refreshDevices
+{
+    BOOL dante = self.kind == AVM_BRIDGE_DANTE;
+    _ndevs = avm_list_hw_devices(_devs, 64);
+    const avm_bridge_config* cfg = self.bridge ? avm_bridge_get_config(self.bridge) : NULL;
+    NSString* current = cfg ? UTF8(cfg->device_uid) : @"";
+    [self.devicePopup removeAllItems];
+    [self.devicePopup addItemWithTitle:@"— Elegir dispositivo —"];
+    self.devicePopup.lastItem.representedObject = @"";
+    BOOL found = NO;
+    uint32_t channels = 0;
+    for (int i = 0; i < _ndevs; i++) {
+        const avm_hw_device* d = &_devs[i];
+        uint32_t n = dante ? d->out_channels : d->in_channels;
+        if (d->is_avmatrix || n == 0 || !strncmp(d->uid, "AVMatrix_Puente_", 16)) continue;
+        NSString* t = [NSString stringWithFormat:@"%@ (%u %@)", UTF8(d->name), (unsigned)n, dante ? @"salidas" : @"entradas"];
+        [self.devicePopup addItemWithTitle:t];
+        self.devicePopup.lastItem.representedObject = UTF8(d->uid);
+        if ([current isEqualToString:UTF8(d->uid)]) { [self.devicePopup selectItem:self.devicePopup.lastItem]; found = YES; channels = n; }
+    }
+    if (!found && current.length) {
+        [self.devicePopup addItemWithTitle:@"(dispositivo elegido: desconectado)"];
+        self.devicePopup.lastItem.representedObject = current;
+        [self.devicePopup selectItem:self.devicePopup.lastItem];
+    }
+    if (!found && !current.length) [self.devicePopup selectItemAtIndex:0];
+    // Canales: los que expone el dispositivo (si no está, los elegidos se conservan).
+    uint32_t maxch = channels ? channels : 64;
+    for (int k = 0; k < (int)self.channelPopups.count; k++) {
+        NSPopUpButton* p = self.channelPopups[k];
+        int sel = cfg ? cfg->channel[k] : k + 1;
+        [p removeAllItems];
+        if (!dante) { [p addItemWithTitle:@"—"]; p.lastItem.tag = 0; }
+        for (uint32_t c = 1; c <= MAX(maxch, (uint32_t)sel); c++) {
+            [p addItemWithTitle:[NSString stringWithFormat:@"%u%@", (unsigned)c, (channels && c > channels) ? @" (no existe)" : @""]];
+            p.lastItem.tag = (NSInteger)c;
+        }
+        [p selectItemWithTag:sel];
+    }
+}
+
+- (avm_bridge_config)configFromUI
+{
+    avm_bridge_config c;
+    if (self.bridge) c = *avm_bridge_get_config(self.bridge); else avm_bridge_config_default(&c, self.kind);
+    NSString* uid = self.devicePopup.selectedItem.representedObject ?: @"";
+    snprintf(c.device_uid, sizeof(c.device_uid), "%s", uid.UTF8String ?: "");
+    for (int k = 0; k < (int)self.channelPopups.count; k++) c.channel[k] = (int)self.channelPopups[k].selectedTag;
+    return c;
+}
+
+- (void)userChanged:(id)sender
+{
+    (void)sender;
+    if (self.onUserChange) self.onUserChange(self);
+}
+
+- (void)togglePressed:(id)sender
+{
+    (void)sender;
+    self.toggleRequested = YES;                        // el controlador decide (permiso de micrófono)
+    if (self.onUserChange) self.onUserChange(self);
+    self.toggleRequested = NO;
+}
+
+- (void)matchRatePressed:(id)sender
+{
+    (void)sender;
+    OSStatus err = avm_bridge_match_rate(self.bridge);
+    if (err != noErr)
+        self.status.stringValue = [NSString stringWithFormat:@"El dispositivo no aceptó la frecuencia (error %d): cámbiela en su propio programa.", (int)err];
+}
+
+- (void)refreshState
+{
+    if (self.bridge == NULL) { self.status.stringValue = @"Sin puente (pruebas)."; return; }
+    char msg[512];
+    avm_bridge_state st = avm_bridge_get_state(self.bridge, msg, sizeof(msg));
+    const avm_bridge_config* cfg = avm_bridge_get_config(self.bridge);
+    self.toggle.title = cfg->enabled ? @"Detener" : @"Activar";
+    self.status.stringValue = UTF8(msg);
+    self.status.toolTip = UTF8(msg);
+    NSColor* c = st == AVM_BRIDGE_RUN ? [NSColor systemGreenColor]
+               : st == AVM_BRIDGE_OFF ? [NSColor tertiaryLabelColor]
+               : (st == AVM_BRIDGE_WAIT_DEVICE || st == AVM_BRIDGE_RATE_MISMATCH || st == AVM_BRIDGE_SUSPENDED) ? [NSColor systemOrangeColor]
+               : [NSColor systemRedColor];
+    self.dot.textColor = c;
+    self.dot.toolTip = UTF8(avm_bridge_state_label(st));
+    self.matchRate.hidden = st != AVM_BRIDGE_RATE_MISMATCH;
+}
+
+@end
+
+static void BridgeNotify(void* ctx);
+
 // ---------------------------------------------------------------------------
 #pragma mark Controlador
 
@@ -1641,14 +1862,11 @@ static NSTextField* SectionTitle(NSString* t)
 @property (strong) NSPopover* renamePopover;   // panel abierto; se suelta al cerrarse
 @property (strong) AVMHelpController* help;    // ventana del manual (se crea al abrirla)
 @property (strong) AVMMixerController* mixer;  // ventana del mixer (se crea al abrirla)
+@property (strong) AVMBridgeRow* danteRow;     // puente Dante (salida hacia DVS)
+@property (strong) AVMBridgeRow* evoRow;       // puente EVO (entradas USB)
+@property (strong) NSStackView* bridgesBox;
 @end
 
-static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
-{
-    NSTextField* t = [NSTextField labelWithString:text];
-    t.font = bold ? [NSFont boldSystemFontOfSize:size] : [NSFont systemFontOfSize:size];
-    return t;
-}
 
 @implementation AVMController
 
@@ -1658,6 +1876,7 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     [self loadNames];
     [self buildMenu];
     [self buildWindow];
+    [self setupBridges];
     [self reload];
     [self startListening];
     [self startMeters];
@@ -1700,12 +1919,131 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 {
     (void)note;
     [self.meterTimer invalidate];
+    // Detiene los puentes (los agregados privados desaparecen con la app).
+    if (self.danteRow.bridge) { avm_bridge_destroy(self.danteRow.bridge); self.danteRow.bridge = NULL; }
+    if (self.evoRow.bridge) { avm_bridge_destroy(self.evoRow.bridge); self.evoRow.bridge = NULL; }
 }
 
+// Con un puente activado la app sigue funcionando aunque se cierre la ventana:
+// el envío a Dante y la recepción de la EVO no se cortan. Clic en el Dock la reabre.
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)app
 {
     (void)app;
+    return ![self anyBridgeEnabled];
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)app hasVisibleWindows:(BOOL)visible
+{
+    (void)app;
+    if (!visible) [self.window makeKeyAndOrderFront:nil];
     return YES;
+}
+
+- (BOOL)anyBridgeEnabled
+{
+    return (self.danteRow.bridge && avm_bridge_get_config(self.danteRow.bridge)->enabled)
+        || (self.evoRow.bridge && avm_bridge_get_config(self.evoRow.bridge)->enabled);
+}
+
+// --- Puentes Dante y EVO
+
+- (void)setupBridges
+{
+    for (AVMBridgeRow* row in @[ self.danteRow, self.evoRow ]) {
+        row.bridge = avm_bridge_create(row.kind, BridgeNotify, (__bridge void*)self);
+        avm_bridge_config c;
+        BridgeConfigLoad(&c, row.kind);
+        if (c.device_uid[0] == 0) [self pickDefaultDevice:&c];
+        __weak AVMController* weakSelf = self;
+        row.onUserChange = ^(AVMBridgeRow* r) { [weakSelf bridgeRowChanged:r]; };
+        avm_bridge_configure(row.bridge, &c);
+    }
+    [self syncBridgeConflicts];
+    avm_bridge_refresh(self.danteRow.bridge);
+    avm_bridge_refresh(self.evoRow.bridge);
+    [self.danteRow refreshDevices];
+    [self.evoRow refreshDevices];
+    // Dispositivos que aparecen o desaparecen (EVO por USB, DVS al arrancar o detenerse).
+    __weak AVMController* weakSelf = self;
+    AudioObjectPropertyAddress devs = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &devs, dispatch_get_main_queue(), ^(UInt32 n, const AudioObjectPropertyAddress* a) {
+        (void)n; (void)a;
+        [weakSelf.danteRow refreshDevices];
+        [weakSelf.evoRow refreshDevices];
+    });
+}
+
+// Primera vez: propone Dante Virtual Soundcard y la EVO si están conectadas.
+- (void)pickDefaultDevice:(avm_bridge_config*)c
+{
+    avm_hw_device d[64];
+    int n = avm_list_hw_devices(d, 64);
+    for (int i = 0; i < n; i++) {
+        if (d[i].is_avmatrix) continue;
+        BOOL match = c->kind == AVM_BRIDGE_DANTE ? (strstr(d[i].name, "Dante Virtual Soundcard") != NULL && d[i].out_channels >= 2)
+                                                  : (strstr(d[i].name, "EVO") != NULL && d[i].in_channels >= 1);
+        if (match) { snprintf(c->device_uid, sizeof(c->device_uid), "%s", d[i].uid); return; }
+    }
+}
+
+// Un puente nunca puede usar el dispositivo del otro (realimentación por la red).
+- (void)syncBridgeConflicts
+{
+    if (!self.danteRow.bridge || !self.evoRow.bridge) return;
+    avm_bridge_set_other_uid(self.danteRow.bridge, avm_bridge_get_config(self.evoRow.bridge)->device_uid);
+    avm_bridge_set_other_uid(self.evoRow.bridge, avm_bridge_get_config(self.danteRow.bridge)->device_uid);
+}
+
+- (void)bridgeRowChanged:(AVMBridgeRow*)row
+{
+    if (!row.bridge) return;
+    avm_bridge_config c = [row configFromUI];
+    if (row.toggleRequested) {
+        if (c.enabled) c.enabled = false;
+        else { [self enableBridgeRow:row config:c]; return; }   // pide antes el permiso de micrófono
+    }
+    [self applyBridgeConfig:c row:row];
+}
+
+- (void)applyBridgeConfig:(avm_bridge_config)c row:(AVMBridgeRow*)row
+{
+    BridgeConfigSave(&c);
+    avm_bridge_configure(row.bridge, &c);
+    [self syncBridgeConflicts];
+    avm_bridge_refresh(self.danteRow.bridge);
+    avm_bridge_refresh(self.evoRow.bridge);
+    [row refreshDevices];
+}
+
+// Leer audio (la EVO o «AV Matrix Dante (puente)») exige el permiso de micrófono de macOS.
+- (void)enableBridgeRow:(AVMBridgeRow*)row config:(avm_bridge_config)c
+{
+    c.enabled = true;
+    AVAuthorizationStatus st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (st == AVAuthorizationStatusAuthorized) { [self applyBridgeConfig:c row:row]; return; }
+    if (st == AVAuthorizationStatusNotDetermined) {
+        __weak AVMController* weakSelf = self;
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (granted) [weakSelf applyBridgeConfig:c row:row];
+                else [weakSelf showError:@"Sin permiso de micrófono, AV Matrix no puede leer el audio del puente. Actívelo en Configuración del Sistema → Privacidad y seguridad → Micrófono."];
+            });
+        }];
+        return;
+    }
+    [self showError:@"AV Matrix no tiene permiso de micrófono: no puede leer el audio del puente. Actívelo en Configuración del Sistema → Privacidad y seguridad → Micrófono."];
+}
+
+- (void)bridgesChanged
+{
+    [self.danteRow refreshState];
+    [self.evoRow refreshState];
+}
+
+static void BridgeNotify(void* ctx)
+{
+    AVMController* c = (__bridge AVMController*)ctx;
+    [c bridgesChanged];
 }
 
 - (void)buildMenu
@@ -1786,7 +2124,15 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     self.infoLabel.lineBreakMode = NSLineBreakByTruncatingTail;
 
     // La leyenda y las explicaciones generales están en la ventana de Ayuda.
-    self.root = [NSStackView stackViewWithViews:@[ toolbar, self.statusLabel, self.scrollView, self.infoLabel ]];
+    // Puentes: Dante (salida hacia DVS) y EVO (entradas USB).
+    self.danteRow = [[AVMBridgeRow alloc] initWithKind:AVM_BRIDGE_DANTE target:self];
+    self.evoRow = [[AVMBridgeRow alloc] initWithKind:AVM_BRIDGE_EVO target:self];
+    self.bridgesBox = [NSStackView stackViewWithViews:@[ self.danteRow.view, self.evoRow.view ]];
+    self.bridgesBox.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.bridgesBox.alignment = NSLayoutAttributeLeading;
+    self.bridgesBox.spacing = 3;
+
+    self.root = [NSStackView stackViewWithViews:@[ toolbar, self.statusLabel, self.bridgesBox, self.scrollView, self.infoLabel ]];
     self.root.orientation = NSUserInterfaceLayoutOrientationVertical;
     self.root.alignment = NSLayoutAttributeLeading;
     self.root.spacing = 6;
@@ -2008,12 +2354,21 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 
 // --- Acciones
 
+// Los presets de medición solo cambian Smaart y LISTENTO: las rutas hacia
+// Dante que ya había se conservan («Vaciar» sí lo quita todo).
+- (void)applyPresetKeepingDante:(avm_matrix*)m
+{
+    avm_matrix cur;
+    if (avm_get_matrix(&cur) == noErr) avm_matrix_copy_dst_group(m, &cur, AVM_DST_GROUP_DANTE);
+    [self apply:m];
+}
+
 - (void)presetMeasure:(id)sender
 {
     (void)sender;
     avm_matrix m;
     avm_matrix_default(&m);
-    [self apply:&m];
+    [self applyPresetKeepingDante:&m];
 }
 
 - (void)presetDirect:(id)sender
@@ -2021,6 +2376,17 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
     (void)sender;
     avm_matrix m;
     avm_matrix_direct(&m);
+    [self applyPresetKeepingDante:&m];
+}
+
+// Botón del puente Dante: Música L -> Dante L y Música R -> Dante R (sin tocar lo demás).
+- (void)connectMusicToDante:(id)sender
+{
+    (void)sender;
+    avm_matrix m;
+    if (avm_get_matrix(&m) != noErr) { [self reload]; return; }
+    m.cell[AVM_DST_DANTE_BASE + 0][AVM_SRC_MUSIC_BASE + 0] = 1;
+    m.cell[AVM_DST_DANTE_BASE + 1][AVM_SRC_MUSIC_BASE + 1] = 1;
     [self apply:&m];
 }
 
@@ -2083,7 +2449,14 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
 {
     NSInteger i = sender.indexOfSelectedItem;
     if (i < 0 || i >= 3) return;
+    // Los puentes mantienen audio abierto en AV Matrix: se pausan durante el
+    // cambio y después se intenta poner la EVO y DVS a la nueva frecuencia.
+    [self setBridgesSuspended:YES];
     OSStatus err = avm_set_sample_rate(kRates[i]);
+    __weak AVMController* weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [weakSelf resumeBridgesMatchingRate:err == noErr];
+    });
     if (err == kAudioHardwareNotReadyError) {
         [self showError:@"No se puede cambiar la frecuencia con audio activo. Detenga el audio en Smaart, LISTENTO y la música, y vuelva a intentarlo."];
         [self reload];
@@ -2092,6 +2465,22 @@ static NSTextField* Label(NSString* text, CGFloat size, BOOL bold)
         [self reload];
     }
     // Si se acepta, la recarga llega por la notificación de cambio de frecuencia.
+}
+
+- (void)setBridgesSuspended:(BOOL)suspended
+{
+    if (self.danteRow.bridge) avm_bridge_set_suspended(self.danteRow.bridge, suspended);
+    if (self.evoRow.bridge) avm_bridge_set_suspended(self.evoRow.bridge, suspended);
+}
+
+- (void)resumeBridgesMatchingRate:(BOOL)changed
+{
+    for (AVMBridgeRow* row in @[ self.danteRow, self.evoRow ]) {
+        if (!row.bridge) continue;
+        avm_bridge_set_suspended(row.bridge, NO);
+        if (changed && avm_bridge_get_config(row.bridge)->enabled && avm_bridge_get_state(row.bridge, NULL, 0) == AVM_BRIDGE_RATE_MISMATCH)
+            avm_bridge_match_rate(row.bridge);   // si el dispositivo no lo acepta, el estado lo indica
+    }
 }
 
 @end

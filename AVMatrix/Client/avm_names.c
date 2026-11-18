@@ -18,11 +18,13 @@ static const char* const kKeys[AVM_NAMES_COUNT] = {
     "listento.out.1", "listento.out.2", "listento.out.3", "listento.out.4",
     "listento.out.5", "listento.out.6", "listento.out.7", "listento.out.8",
     "music.out.1", "music.out.2",
-    // Destinos (índices de la matriz 0..15)
+    "evo.in.1", "evo.in.2", "evo.in.3", "evo.in.4",
+    // Destinos (índices de la matriz 0..17)
     "smaart.in.1", "smaart.in.2", "smaart.in.3", "smaart.in.4",
     "smaart.in.5", "smaart.in.6", "smaart.in.7", "smaart.in.8",
     "listento.in.1", "listento.in.2", "listento.in.3", "listento.in.4",
     "listento.in.5", "listento.in.6", "listento.in.7", "listento.in.8",
+    "dante.out.1", "dante.out.2",
 };
 
 void avm_names_init(avm_names* n)
@@ -45,9 +47,14 @@ int avm_names_index_of_key(const char* key)
 
 void avm_names_number(int idx, char* buf, size_t len)
 {
-    if (idx == avm_names_src_index(AVM_SRC_MUSIC_BASE))          snprintf(buf, len, "L");
-    else if (idx == avm_names_src_index(AVM_SRC_MUSIC_BASE + 1)) snprintf(buf, len, "R");
-    else if (idx >= 0 && idx < AVM_NAMES_COUNT)                  snprintf(buf, len, "%d", (idx < AVM_NUM_SOURCES ? idx : idx - AVM_NUM_SOURCES) % 8 + 1);
+    if (idx == avm_names_src_index(AVM_SRC_MUSIC_BASE) || idx == avm_names_dst_index(AVM_DST_DANTE_BASE))
+        snprintf(buf, len, "L");
+    else if (idx == avm_names_src_index(AVM_SRC_MUSIC_BASE + 1) || idx == avm_names_dst_index(AVM_DST_DANTE_BASE + 1))
+        snprintf(buf, len, "R");
+    else if (idx >= avm_names_src_index(AVM_SRC_EVO_BASE) && idx < AVM_NUM_SOURCES)
+        snprintf(buf, len, "%d", idx - avm_names_src_index(AVM_SRC_EVO_BASE) + 1);
+    else if (idx >= 0 && idx < AVM_NAMES_COUNT)
+        snprintf(buf, len, "%d", (idx < AVM_NUM_SOURCES ? idx : idx - AVM_NUM_SOURCES) % 8 + 1);
     else if (len) buf[0] = 0;
 }
 
@@ -58,9 +65,11 @@ void avm_names_default(int idx, char* buf, size_t len)
     if (idx < 0 || idx >= AVM_NAMES_COUNT) { if (len) buf[0] = 0; return; }
     if (idx < AVM_SRC_LINK_BASE)                snprintf(buf, len, "Salida %s", num);
     else if (idx < AVM_SRC_MUSIC_BASE)          snprintf(buf, len, "Retorno %s", num);
-    else if (idx < AVM_NUM_SOURCES)             snprintf(buf, len, "Música %s", num);
+    else if (idx < AVM_SRC_EVO_BASE)            snprintf(buf, len, "Música %s", num);
+    else if (idx < AVM_NUM_SOURCES)             snprintf(buf, len, "EVO %s", num);
     else if (idx < AVM_NUM_SOURCES + AVM_DST_LINK_BASE) snprintf(buf, len, "Entrada %s", num);
-    else                                        snprintf(buf, len, "Envío %s", num);
+    else if (idx < AVM_NUM_SOURCES + AVM_DST_DANTE_BASE) snprintf(buf, len, "Envío %s", num);
+    else                                        snprintf(buf, len, "Dante %s", num);
 }
 
 // Longitud de la secuencia UTF-8 que empieza en p (1..4), o 0 si no es válida.

@@ -137,7 +137,7 @@ static void test_db_conversion(void)
 static void test_pack_unpack(void)
 {
     avm_mixer a; avm_mixer_default(&a);
-    for (int i = 0; i < AVM_NUM_SOURCES; i++) { a.src_gain[i] = (float)i / 20.0f; a.src_mute[i] = (uint8_t)(i % 3 == 0); }
+    for (int i = 0; i < AVM_NUM_SOURCES; i++) { a.src_gain[i] = (float)i / 24.0f; a.src_mute[i] = (uint8_t)(i % 3 == 0); }
     for (int i = 0; i < AVM_NUM_DESTS; i++)   { a.dst_gain[i] = 1.0f - (float)i / 32.0f; a.dst_mute[i] = (uint8_t)(i % 2); }
     uint8_t blob[AVM_MIXER_BLOB_SIZE];
     avm_mixer_pack(&a, blob);

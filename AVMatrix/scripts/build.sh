@@ -48,8 +48,8 @@ mkdir -p "$APP/Contents/MacOS"
 cp App/Info.plist "$APP/Contents/Info.plist"
 clang $ARCHS -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
     -o "$APP/Contents/MacOS/AVMatrix" \
-    App/AVMatrixApp.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-    -framework Cocoa -framework CoreAudio -framework CoreFoundation
+    App/AVMatrixApp.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation
 # Icono personalizado (antes de firmar: queda sellado en la firma del bundle).
 set +e
 bash scripts/resolve_icon.sh "$APP"
@@ -87,6 +87,11 @@ clang $CFLAGS -o "$OUT/test_persist" tests/test_persist.c Driver/src/avm_persist
 "$OUT/test_persist"
 clang $CFLAGS -o "$OUT/test_selftest" tests/test_selftest.c
 "$OUT/test_selftest"
+clang $CFLAGS -o "$OUT/test_evo_dante" tests/test_evo_dante.c Driver/src/avm_core.c
+"$OUT/test_evo_dante"
+clang $CFLAGS -o "$OUT/test_bridge" tests/test_bridge.c Client/avm_bridge_core.c
+"$OUT/test_bridge"
+bash tests/test_bridge_static.sh
 bash tests/test_avmctl_static.sh
 bash tests/test_install.sh
 bash tests/test_app_strings.sh
@@ -94,18 +99,18 @@ bash tests/test_app_strings.sh
 # liberación de memoria. Muestra brevemente el panel en pantalla; con
 # AVM_UI_NO_WINDOW=1 solo hace las comprobaciones sin ventana.
 clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
-    -o "$OUT/test_rename_ui" tests/test_rename_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-    -framework Cocoa -framework CoreAudio -framework CoreFoundation
+    -o "$OUT/test_rename_ui" tests/test_rename_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation
 "$OUT/test_rename_ui"
 # Prueba nativa de la pantalla principal compacta y de la ventana de Ayuda.
 clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
-    -o "$OUT/test_main_ui" tests/test_main_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-    -framework Cocoa -framework CoreAudio -framework CoreFoundation
+    -o "$OUT/test_main_ui" tests/test_main_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation
 "$OUT/test_main_ui"
 # Prueba nativa de la ventana Mixer (sin tocar el driver: modo offline).
 clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -mmacosx-version-min=$MINOS \
-    -o "$OUT/test_mixer_ui" tests/test_mixer_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-    -framework Cocoa -framework CoreAudio -framework CoreFoundation
+    -o "$OUT/test_mixer_ui" tests/test_mixer_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation
 "$OUT/test_mixer_ui"
 
 echo "== Verificación =="

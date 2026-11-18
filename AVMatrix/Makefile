@@ -29,6 +29,11 @@ test:
 	$(CC) $(CFLAGS) -o $(BUILD)/test_fader tests/test_fader.c App/avm_fader.c Driver/src/avm_core.c -lm
 	./$(BUILD)/test_fader
 	bash tests/compare_engine_unity.sh
+	$(CC) $(CFLAGS) -o $(BUILD)/test_evo_dante tests/test_evo_dante.c Driver/src/avm_core.c -lm
+	./$(BUILD)/test_evo_dante
+	$(CC) $(CFLAGS) -o $(BUILD)/test_bridge tests/test_bridge.c Client/avm_bridge_core.c -lm
+	./$(BUILD)/test_bridge
+	bash tests/test_bridge_static.sh
 	$(CC) $(CFLAGS) -o $(BUILD)/test_persist tests/test_persist.c Driver/src/avm_persist.c Driver/src/avm_core.c -lm -lpthread
 	./$(BUILD)/test_persist
 	$(CC) $(CFLAGS) -o $(BUILD)/test_selftest tests/test_selftest.c
@@ -62,6 +67,10 @@ test-sanitize:
 	./$(BUILD)/test_persist_tsan
 	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_persist_asan tests/test_persist.c Driver/src/avm_persist.c Driver/src/avm_core.c -lm -lpthread
 	./$(BUILD)/test_persist_asan
+	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_evo_dante_asan tests/test_evo_dante.c Driver/src/avm_core.c -lm
+	./$(BUILD)/test_evo_dante_asan
+	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_bridge_asan tests/test_bridge.c Client/avm_bridge_core.c -lm
+	./$(BUILD)/test_bridge_asan
 	gcc $(CFLAGS) -fsanitize=address,undefined -o $(BUILD)/test_fader_asan tests/test_fader.c App/avm_fader.c Driver/src/avm_core.c -lm
 	./$(BUILD)/test_fader_asan
 
@@ -74,17 +83,17 @@ cross:
 	  clang -target $$a-apple-macos$(MINOS) $(XFLAGS) -o $(BUILD)/cross/avmctl_$$a \
 	    Client/avmctl.c Client/avm_client.c Driver/src/avm_core.c -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
-	    -o $(BUILD)/cross/app_$$a App/AVMatrixApp.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-	    -framework Cocoa -framework CoreAudio -framework CoreFoundation || exit 1; \
+	    -o $(BUILD)/cross/app_$$a App/AVMatrixApp.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+	    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
-	    -o $(BUILD)/cross/test_rename_ui_$$a tests/test_rename_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-	    -framework Cocoa -framework CoreAudio -framework CoreFoundation || exit 1; \
+	    -o $(BUILD)/cross/test_rename_ui_$$a tests/test_rename_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+	    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
-	    -o $(BUILD)/cross/test_main_ui_$$a tests/test_main_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-	    -framework Cocoa -framework CoreAudio -framework CoreFoundation || exit 1; \
+	    -o $(BUILD)/cross/test_main_ui_$$a tests/test_main_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+	    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation || exit 1; \
 	  clang -target $$a-apple-macos$(MINOS) -isysroot $(SDK) -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-four-char-constants -fuse-ld=lld \
-	    -o $(BUILD)/cross/test_mixer_ui_$$a tests/test_mixer_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_names.c Driver/src/avm_core.c \
-	    -framework Cocoa -framework CoreAudio -framework CoreFoundation || exit 1; \
+	    -o $(BUILD)/cross/test_mixer_ui_$$a tests/test_mixer_ui.m App/avm_manual.c App/avm_fader.c Client/avm_client.c Client/avm_bridge.c Client/avm_bridge_core.c Client/avm_names.c Driver/src/avm_core.c \
+	    -framework Cocoa -framework AVFoundation -framework CoreAudio -framework CoreFoundation || exit 1; \
 	done
 
 dist: cross

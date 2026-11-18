@@ -70,8 +70,8 @@ static void test_compact_geometry(void)
 
     AVMMatrixView* mv = [[AVMMatrixView alloc] initWithFrame:NSZeroRect];
     [mv expandAll:YES];
-    // 3 cabeceras + 18 transmisores; 2 cabeceras + 16 receptores.
-    CGFloat w = kLeftW + 21 * kCell + kSumW, h = kTopH + 18 * kCell + 1;
+    // 4 cabeceras + 22 transmisores (con EVO 1-4); 3 cabeceras + 18 receptores (con Dante L/R).
+    CGFloat w = kLeftW + 26 * kCell + kSumW, h = kTopH + 21 * kCell + 1;
     CHECK(fabs(mv.frame.size.width - w) < 0.5 && fabs(mv.frame.size.height - h) < 0.5,
           "tamaño de la matriz desplegada %.0f×%.0f (esperado %.0f×%.0f)", mv.frame.size.width, mv.frame.size.height, w, h);
 }
@@ -106,6 +106,14 @@ static void test_names_and_tooltips(void)
     NSPoint q = NSMakePoint(kLeftW + col * kCell + kCell / 2, 20);
     NSString* tip2 = [mv view:mv stringForToolTip:0 point:q userData:NULL];
     CHECK([tip2 containsString:@"Música izquierda del escenario"] && [tip2 hasPrefix:@"L · "], "ayuda emergente de un transmisor: «%s»", tip2.UTF8String);
+
+    // Columnas EVO y fila Dante en la matriz.
+    int evoCol = 1 + 8 + 1 + 8 + 1 + 2 + 1;   // ... Música (1+2), cabecera EVO -> EVO 1
+    NSString* tipEvo = [mv view:mv stringForToolTip:0 point:NSMakePoint(kLeftW + evoCol * kCell + kCell / 2, 20) userData:NULL];
+    CHECK([tipEvo hasPrefix:@"1 · EVO 1"], "columna EVO 1 en la matriz: «%s»", tipEvo.UTF8String);
+    int danteRow = 1 + 8 + 1 + 8 + 1;          // Smaart (1+8), LISTENTO (1+8), cabecera Dante -> Dante L
+    NSString* tipDante = [mv view:mv stringForToolTip:0 point:NSMakePoint(kRxNameX + 10, kTopH + danteRow * kCell + kCell / 2) userData:NULL];
+    CHECK([tipDante hasPrefix:@"L · Dante L"], "fila Dante L en la matriz: «%s»", tipDante.UTF8String);
 
     // Fuera de un nombre (sobre el medidor): sin ayuda emergente.
     CHECK([[mv view:mv stringForToolTip:0 point:NSMakePoint(kRxMeterX + 10, p.y) userData:NULL] length] == 0, "sin ayuda emergente sobre el medidor");
@@ -146,6 +154,18 @@ static void test_main_window(void)
     BOOL legend = NO;
     for (NSTextField* f in fields) if ([f.stringValue containsString:@"Verde ✓"] || [f.stringValue containsString:@"Solo transporte"]) legend = YES;
     CHECK(!legend, "la leyenda ya no está en la pantalla principal");
+
+    // Puentes: dos filas con dispositivo, canales, Activar/Detener y estado.
+    CHECK(c.danteRow && c.evoRow && c.danteRow.view.superview && c.evoRow.view.superview, "filas de los puentes Dante y EVO en la ventana principal");
+    CHECK(c.danteRow.channelPopups.count == 2 && c.evoRow.channelPopups.count == 4, "canales: Dante L/R y EVO 1-4");
+    CHECK([c.danteRow.toggle.title isEqualToString:@"Activar"] && [c.evoRow.toggle.title isEqualToString:@"Activar"], "botones «Activar»");
+    CHECK(c.danteRow.devicePopup && c.evoRow.devicePopup, "selector de dispositivo en cada puente");
+    CHECK(buttonTitled(content, @"Conectar Música L/R") != nil, "botón «Conectar Música L/R» en el puente Dante");
+    [c.danteRow refreshDevices];
+    int avmListed = 0;
+    for (NSMenuItem* it in c.danteRow.devicePopup.itemArray)
+        if ([it.representedObject isKindOfClass:[NSString class]] && [(NSString*)it.representedObject hasPrefix:@"AVMatrix_"]) avmListed++;
+    CHECK(avmListed == 0, "los dispositivos de AV Matrix nunca aparecen como destino del puente (realimentación)");
 
     [c matrixView:c.matrixView hoverInfo:@"Smaart Salida 1 → Smaart Entrada 8 (referencia local): conectado"];
     CHECK([c.infoLabel.stringValue containsString:@"→"], "la descripción de rutas se sigue mostrando");

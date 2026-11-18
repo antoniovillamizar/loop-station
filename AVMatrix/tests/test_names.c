@@ -32,18 +32,20 @@ static void test_keys_are_stable(void)
         "smaart.out.1", "smaart.out.2", "smaart.out.3", "smaart.out.4", "smaart.out.5", "smaart.out.6", "smaart.out.7", "smaart.out.8",
         "listento.out.1", "listento.out.2", "listento.out.3", "listento.out.4", "listento.out.5", "listento.out.6", "listento.out.7", "listento.out.8",
         "music.out.1", "music.out.2",
+        "evo.in.1", "evo.in.2", "evo.in.3", "evo.in.4",
         "smaart.in.1", "smaart.in.2", "smaart.in.3", "smaart.in.4", "smaart.in.5", "smaart.in.6", "smaart.in.7", "smaart.in.8",
         "listento.in.1", "listento.in.2", "listento.in.3", "listento.in.4", "listento.in.5", "listento.in.6", "listento.in.7", "listento.in.8",
+        "dante.out.1", "dante.out.2",
     };
     int ok = 1;
     for (int i = 0; i < AVM_NAMES_COUNT; i++) {
         if (strcmp(avm_names_key(i), expected[i]) != 0) ok = 0;
         if (avm_names_index_of_key(expected[i]) != i) ok = 0;
     }
-    CHECK(ok, "34 claves estables y únicas (dispositivo.dirección.número)");
+    CHECK(ok, "40 claves estables y únicas (dispositivo.dirección.número); las 34 anteriores no cambian");
     CHECK(avm_names_key(-1) == NULL && avm_names_key(AVM_NAMES_COUNT) == NULL, "índices fuera de rango");
     CHECK(avm_names_index_of_key("smaart.in.9") == -1, "clave desconocida");
-    CHECK(avm_names_src_index(AVM_SRC_MUSIC_BASE + 1) == 17 && avm_names_dst_index(AVM_DST_LOCAL_REFERENCE) == 25,
+    CHECK(avm_names_src_index(AVM_SRC_MUSIC_BASE + 1) == 17 && avm_names_dst_index(AVM_DST_LOCAL_REFERENCE) == 29,
           "índices de fuentes y destinos coinciden con la matriz");
 }
 
@@ -57,6 +59,21 @@ static void test_defaults_and_numbers(void)
     avm_names_default(avm_names_dst_index(AVM_DST_LINK_BASE + 1), b, sizeof(b));   CHECK(!strcmp(b, "Envío 2"), "%s", b);
     avm_names_number(avm_names_src_index(AVM_SRC_MUSIC_BASE), n, sizeof(n));   CHECK(!strcmp(n, "L"), "número de Música L");
     avm_names_number(avm_names_dst_index(AVM_DST_LINK_BASE + 7), n, sizeof(n)); CHECK(!strcmp(n, "8"), "número de Envío 8");
+    // Canales nuevos: EVO 1-4 (fuentes) y Dante L/R (destinos).
+    for (int k = 0; k < 4; k++) {
+        char want[16];
+        snprintf(want, sizeof(want), "EVO %d", k + 1);
+        avm_names_default(avm_names_src_index(AVM_SRC_EVO_BASE + k), b, sizeof(b));
+        avm_names_number(avm_names_src_index(AVM_SRC_EVO_BASE + k), n, sizeof(n));
+        CHECK(!strcmp(b, want) && n[0] == '1' + k && n[1] == 0, "nombre y número de EVO %d: «%s» «%s»", k + 1, b, n);
+    }
+    avm_names_default(avm_names_dst_index(AVM_DST_DANTE_BASE), b, sizeof(b));     CHECK(!strcmp(b, "Dante L"), "%s", b);
+    avm_names_default(avm_names_dst_index(AVM_DST_DANTE_BASE + 1), b, sizeof(b)); CHECK(!strcmp(b, "Dante R"), "%s", b);
+    avm_names_number(avm_names_dst_index(AVM_DST_DANTE_BASE + 1), n, sizeof(n));  CHECK(!strcmp(n, "R"), "número de Dante R");
+    avm_names_number(avm_names_dst_index(AVM_DST_LINK_BASE), n, sizeof(n));       CHECK(!strcmp(n, "1"), "número de Envío 1 sin cambios");
+    avm_names nm; avm_names_init(&nm);
+    CHECK(avm_names_set(&nm, avm_names_src_index(AVM_SRC_EVO_BASE + 2), "Micrófono sala") == AVM_NAME_OK
+          && avm_names_set(&nm, avm_names_dst_index(AVM_DST_DANTE_BASE), "Consola L") == AVM_NAME_OK, "EVO y Dante se pueden renombrar");
 }
 
 static void test_edit_restore_and_accents(void)

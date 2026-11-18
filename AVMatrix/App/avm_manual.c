@@ -4,7 +4,9 @@
 
 const avm_manual_section avm_manual_sections[] = {
 { "inicio", "Qué es AV Matrix",
-"AV Matrix es una tarjeta de audio virtual para el Mac. No tiene cables ni hardware: crea tres dispositivos de audio que las aplicaciones ven como si fueran tarjetas reales, y una matriz que decide qué señal llega a cada sitio.\n"
+"AV Matrix es una tarjeta de audio virtual para el Mac. No tiene cables ni hardware: crea dispositivos de audio que las aplicaciones ven como si fueran tarjetas reales, y una matriz que decide qué señal llega a cada sitio.\n"
+"\n"
+"Además, la app tiene dos puentes propios: envía Dante L/R a Dante Virtual Soundcard y recibe las cuatro entradas USB de la EVO, sin abrir Logic, Loopback ni otro programa.\n"
 "\n"
 "Sirve para medir con Smaart a través de LISTENTO: la señal de Smaart sale hacia el otro extremo por LISTENTO, vuelve por LISTENTO y llega otra vez a Smaart, sin mezclas involuntarias.\n"
 "\n"
@@ -12,14 +14,15 @@ const avm_manual_section avm_manual_sections[] = {
 "\n"
 "### La pantalla principal\n"
 "- Barra superior: frecuencia, presets, desplegar o plegar los grupos, Recargar, Reparar frecuencia (solo aparece si hace falta), Mixer y Ayuda.\n"
-"- Línea de estado: los tres dispositivos y la frecuencia, o el problema que haya (por ejemplo, un dispositivo que falta). Si algún canal del mixer está atenuado o en MUTE, lo indica en naranja.\n"
+"- Puentes: una fila para Dante (salida) y otra para la EVO (entradas), con dispositivo, canales, Activar/Detener y estado.\n"
+"- Línea de estado: los dispositivos y la frecuencia, o el problema que haya (por ejemplo, un dispositivo que falta). Si algún canal del mixer está atenuado o en MUTE, lo indica en naranja.\n"
 "- La matriz, con los medidores de cada canal.\n"
 "- Debajo de la matriz: la descripción de la ruta, el canal o el grupo que está bajo el ratón.\n"
 "\n"
 "Esta ayuda está incluida en la app y funciona sin internet. Se abre con el botón Ayuda o con el menú Ayuda → Manual de AV Matrix." },
 
-{ "dispositivos", "Los tres dispositivos y cómo seleccionarlos",
-"AV Matrix crea tres dispositivos. Los tres comparten un solo reloj y la misma frecuencia, así que el audio pasa de uno a otro sin deriva.\n"
+{ "dispositivos", "Los dispositivos y cómo seleccionarlos",
+"AV Matrix crea cinco dispositivos: los tres que se eligen en las aplicaciones (Smaart, LISTENTO y Música) y dos de puente que solo usa la propia app (Dante y EVO). Todos comparten un solo reloj y la misma frecuencia, así que el audio pasa de uno a otro sin deriva.\n"
 "\n"
 "### AV Matrix Smaart (8 entradas y 8 salidas)\n"
 "Es el único dispositivo que se elige en Smaart, a la vez para entrada y para salida. Por sus salidas (Salida 1-8) sale lo que Smaart genera, por ejemplo el ruido rosa. Por sus entradas (Entrada 1-8) llega lo que Smaart mide.\n"
@@ -39,6 +42,11 @@ const avm_manual_section avm_manual_sections[] = {
 "- Música: Configuración del Sistema → Sonido → Salida → AV Matrix Música, o el selector de salida de la aplicación.\n"
 "- Para comprobar que existen: Configuración de Audio MIDI (en Aplicaciones → Utilidades).\n"
 "\n"
+"### Los dispositivos de puente\n"
+"- AV Matrix Dante (puente): 2 entradas, Dante L y Dante R. La app las lee y las envía a Dante Virtual Soundcard.\n"
+"- AV Matrix EVO (puente): 4 salidas, EVO 1-4. La app escribe en ellas lo que llega por las entradas USB de la EVO.\n"
+"- No hace falta elegirlos en ninguna aplicación: los usa la app AV Matrix (ver «Puentes: Dante Virtual Soundcard y EVO»). No pueden ser la salida ni la entrada por defecto del Mac.\n"
+"\n"
 "AV Matrix Smaart y AV Matrix LISTENTO no pueden ser la salida por defecto del sistema, para que los sonidos del Mac no entren en la medición. Ninguno de los tres puede ser el dispositivo de alertas." },
 
 { "matriz", "La matriz: transmisores, receptores y conexiones",
@@ -49,11 +57,13 @@ const avm_manual_section avm_manual_sections[] = {
 "- Smaart: Salida 1-8.\n"
 "- LISTENTO: Retorno 1-8 (lo que vuelve del otro extremo).\n"
 "- Música: L y R.\n"
+"- EVO: 1-4 (las entradas USB de la EVO, por el puente EVO).\n"
 "\n"
 "### Receptores (izquierda)\n"
 "Son los destinos: lo que las aplicaciones reciben de AV Matrix. Cada fila es un canal, con su número, su nombre y su medidor.\n"
 "- Smaart: Entrada 1-8 (lo que Smaart mide).\n"
 "- LISTENTO: Envío 1-8 (lo que LISTENTO transmite).\n"
+"- Dante: L y R (lo que el puente envía a Dante Virtual Soundcard).\n"
 "\n"
 "### Conectar y desconectar\n"
 "- Un clic en la casilla donde se cruzan un transmisor y un receptor la conecta; otro clic la desconecta.\n"
@@ -211,12 +221,54 @@ const avm_manual_section avm_manual_sections[] = {
 "- Un MUTE en la referencia o en la medición deja a Smaart sin esa señal: el buscador de delay y la coherencia dejan de funcionar.\n"
 "- La fase y el retardo no cambian con el mixer: no añade retardo ni filtros." },
 
+{ "puentes", "Puentes: Dante Virtual Soundcard y EVO",
+"Los puentes forman parte de AV Matrix: la app copia el audio entre sus dispositivos y Dante Virtual Soundcard o la EVO. No hace falta abrir Logic, Loopback ni otro programa.\n"
+"\n"
+"### Recorridos\n"
+"- Música hacia Dante: Apple Music → AV Matrix Música → matriz y mixer → Dante L/R → puente Dante → Dante Virtual Soundcard → consola Dante.\n"
+"- EVO hacia la matriz: entradas USB de la EVO → puente EVO → fuentes EVO 1-4 → matriz y mixer → Smaart, LISTENTO o Dante.\n"
+"\n"
+"### Puente Dante (salida)\n"
+"- Dispositivo: elija Dante Virtual Soundcard (debe estar iniciada en su programa).\n"
+"- Canales: L y R son los canales de DVS que reciben Dante L y Dante R. Por defecto, 1 y 2. Deben ser distintos.\n"
+"- En la matriz, conecte Música L → Dante L y Música R → Dante R. El botón «Conectar Música L/R» hace exactamente eso, sin tocar nada más.\n"
+"- El volumen y el MUTE de la música se ajustan en el Mixer: Música L/R (entradas) y Dante L/R (salidas). Solo atenúan; nunca suben de 0 dB.\n"
+"\n"
+"### Puente EVO (entradas)\n"
+"- Dispositivo: elija la EVO. La lista indica cuántas entradas expone de verdad.\n"
+"- Canales: para cada fuente EVO 1-4, la entrada de la EVO que llega a ella. Por defecto, 1-4. «—» la deja sin entrada.\n"
+"- Si la EVO expone menos de cuatro entradas (por ejemplo, una EVO 4 tiene dos), las que faltan quedan en silencio y el estado lo avisa.\n"
+"- Cada entrada es una fuente separada: nunca se mezclan solas. Solo se suman si usted conecta dos casillas al mismo destino.\n"
+"- Cada fuente EVO tiene número, nombre editable, medidor, volumen y MUTE, como las demás.\n"
+"\n"
+"### Activar, Detener y estado\n"
+"- «Activar» arranca el puente; «Detener» lo para. La app recuerda lo elegido y lo vuelve a activar al abrirse.\n"
+"- El punto de color indica el estado: verde = conectado; naranja = desconectado, esperando o frecuencias distintas; rojo = error o configuración no válida; gris = detenido.\n"
+"- Si Dante Virtual Soundcard o la EVO desaparecen (se detiene DVS o se desconecta el USB), el puente se detiene de forma segura y lo indica. Cuando vuelven, se reconecta solo, empezando de cero: nunca se reproduce audio viejo.\n"
+"- La primera vez, macOS pide permiso de micrófono para AV Matrix: es necesario para leer el audio de los puentes.\n"
+"- Con un puente activo, cerrar la ventana no detiene el envío: la app sigue funcionando. Haga clic en su icono del Dock para volver a verla. Para detenerlo todo, salga de la app.\n"
+"\n"
+"### Relojes y frecuencias\n"
+"- AV Matrix, la EVO y Dante Virtual Soundcard tienen relojes distintos. Cada puente usa el reloj del dispositivo externo y CoreAudio compensa la diferencia en el lado de AV Matrix: sin cortes ni deriva acumulada.\n"
+"- Las frecuencias deben coincidir. Si no, el puente no arranca y aparece «Igualar frecuencia», que pone la EVO o DVS a la frecuencia de AV Matrix (DVS puede no permitirlo: entonces cámbiela en su programa o en Dante Controller).\n"
+"- Empiece a 48 kHz. 44,1 y 96 kHz funcionan si Dante Virtual Soundcard y la red Dante los admiten.\n"
+"\n"
+"### Sin realimentación\n"
+"- El puente Dante solo lee Dante L/R y solo escribe en las salidas de DVS; el puente EVO solo lee la EVO y solo escribe en las fuentes EVO 1-4.\n"
+"- Ningún puente puede usar un dispositivo de AV Matrix, y los dos puentes no pueden usar el mismo dispositivo.\n"
+"- Las rutas de Smaart y LISTENTO y la referencia local (Salida 1 → Entrada 8) no cambian: los presets de medición conservan las rutas hacia Dante y no usan la EVO.\n"
+"\n"
+"### Medición con Smaart\n"
+"- Una entrada EVO conectada a una entrada de Smaart llega con el retardo del puente (unos pocos milisegundos): el buscador de delay de Smaart lo encuentra.\n"
+"- No conecte la EVO a la Entrada 8 si esa entrada es la referencia local de la medición." },
+
 { "frecuencias", "Frecuencias y formatos",
 "### Frecuencias\n"
 "- 44,1 kHz, 48 kHz y 96 kHz. Se eligen en el menú Frecuencia de la barra superior, en Smaart o con avmctl rate.\n"
-"- Los tres dispositivos cambian siempre juntos.\n"
+"- Los cinco dispositivos de AV Matrix cambian siempre juntos.\n"
+"- Con un puente activo, cambie la frecuencia desde la app: pausa los puentes, cambia AV Matrix e intenta poner la EVO y Dante Virtual Soundcard a la misma frecuencia.\n"
 "- Solo se puede cambiar sin audio activo: detenga Smaart, cierre LISTENTO y pare la música antes. Si hay audio, el cambio se rechaza con un aviso.\n"
-"- Si un cambio queda a medias, la línea de estado lo indica en rojo y aparece el botón Reparar frecuencia. Sin audio activo, púlselo (o use avmctl recover): vuelve a aplicar la frecuencia en los tres dispositivos. Mientras tanto, el audio no arranca.\n"
+"- Si un cambio queda a medias, la línea de estado lo indica en rojo y aparece el botón Reparar frecuencia. Sin audio activo, púlselo (o use avmctl recover): vuelve a aplicar la frecuencia en todos los dispositivos de AV Matrix. Mientras tanto, el audio no arranca.\n"
 "\n"
 "### Formatos\n"
 "Las aplicaciones siempre intercambian audio con AV Matrix en 32 bits coma flotante; así funciona CoreAudio. El formato físico de cada dispositivo se puede elegir en Configuración de Audio MIDI o con avmctl format:\n"
@@ -226,6 +278,16 @@ const avm_manual_section avm_manual_sections[] = {
 "- Los formatos enteros recortan a escala completa. En un dispositivo virtual no hay convertidores: elegir 16 o 24 bits solo reduce la resolución." },
 
 { "problemas", "Diagnóstico de problemas",
+"### El puente Dante o EVO dice «Desconectado»\n"
+"Dante Virtual Soundcard no está iniciada o la EVO no está conectada por USB. Inícielos o conéctelos: el puente se reconecta solo.\n"
+"\n"
+"### El puente dice «Frecuencias distintas»\n"
+"Pulse «Igualar frecuencia» o ponga el mismo valor en Dante Controller o en el dispositivo.\n"
+"\n"
+"### El puente funciona pero no se oye nada\n"
+"- Dante: compruebe en la matriz Música L/R → Dante L/R, el Mixer, y en Dante Controller que los canales de DVS van a la consola.\n"
+"- EVO: compruebe el medidor de la fuente EVO; si marca «—», el puente no recibe audio (permiso de micrófono o canal elegido).\n"
+"\n"
 "### La línea de estado dice «Driver no encontrado»\n"
 "El driver no está instalado o macOS aún no lo ha cargado. Instálelo (ver INSTALAR.md) y pulse Recargar. En Terminal, avmctl status muestra qué dispositivos encuentra.\n"
 "\n"
@@ -256,6 +318,8 @@ const avm_manual_section avm_manual_sections[] = {
 "- Registro del sistema: log show --last 5m --predicate 'process CONTAINS \"coreaudiod\"' | grep -i avmatrix" },
 
 { "limitaciones", "Limitaciones conocidas",
+"- Los puentes Dante y EVO funcionan mientras la app AV Matrix está abierta (aunque su ventana esté cerrada). Todavía no se han probado con Dante Virtual Soundcard ni con la EVO reales.\n"
+"- Cada puente añade unos milisegundos de retardo (el buffer del dispositivo agregado y la compensación de reloj).\n"
 "- A 96 kHz hay silencios pendientes de corregir. Mientras tanto, para mediciones importantes use 44,1 o 48 kHz, y compruebe el audio antes de medir a 96 kHz.\n"
 "- La compatibilidad con Smaart y LISTENTO, y la precisión de una medición por internet, todavía no se han verificado del todo en uso real.\n"
 "- El transporte no tiene latencia cero: hay al menos un ciclo de buffer de CoreAudio. AV Matrix no compensa retardos; el buscador de delay de Smaart encuentra el retardo total.\n"

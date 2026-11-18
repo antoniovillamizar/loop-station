@@ -1,8 +1,123 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 13; revisión 1 del 18 de octubre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 14; revisión 1 del 18 de octubre; revisión 14 del 18 de noviembre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 13 — mixer: arranque con MUTE, guardado ordenado y veredicto de la autoprueba (sobre `ee604ad`)
+## 0. Revisión 14 — puentes Dante Virtual Soundcard y EVO por USB (sobre `ea2e89f`)
+
+**Encargo:**
+- Enviar la música a Dante Virtual Soundcard (DVS) desde AV Matrix, sin Logic ni Loopback.
+- Recibir las cuatro entradas USB de la EVO como fuentes de la matriz.
+
+Antes de modificar se hizo una copia de seguridad del proyecto en `ea2e89f`. **No se instaló nada ni se reinició coreaudiod.**
+
+**Requiere instalación COMPLETA** (`install.sh`, no `--app-only`): cambian el motor (más canales), el driver (dos dispositivos nuevos), el cliente, `avmctl` y la app.
+
+**Qué se comprobó y dónde:**
+- **En Linux, con pruebas simuladas:**
+  - el motor con EVO 1-4 y Dante L/R;
+  - la lógica de los puentes: reparto de canales en el agregado, copia, fundido, estados, desconexión y reconexión, frecuencias y realimentación;
+  - los nombres, el manual y las comprobaciones estáticas;
+  - la **comparación bit a bit** de Smaart y LISTENTO con `fddbc62` y con `ea2e89f`;
+  - la compilación cruzada de driver, app, `avmctl` y pruebas nativas.
+- **En un Mac:** nada.
+- **Con DVS o con la EVO reales:** nada. La parte de CoreAudio de los puentes (`Client/avm_bridge.c`) está escrita y compilada, **sin ejecutar**. Tampoco se ha comprobado qué canales expone la EVO real.
+
+### 0.14.1 Diseño
+
+- **No se reutiliza ningún canal ocupado.** El driver añade dos dispositivos que solo usa la app:
+  - **«AV Matrix Dante (puente)»:** 2 entradas = **destinos Dante L/R** de la matriz (grupo nuevo de destinos 17-18).
+  - **«AV Matrix EVO (puente)»:** 4 salidas = **fuentes EVO 1-4** de la matriz (grupo nuevo de fuentes 19-22).
+  - Ninguno puede ser dispositivo por defecto. Comparten el reloj y la frecuencia de AV Matrix (cinco dispositivos).
+- **Los puentes** (`Client/avm_bridge.[ch]`, dentro de la app):
+  - cada uno crea un **dispositivo agregado privado** con [dispositivo puente de AV Matrix, DVS o la EVO];
+  - el **reloj y dispositivo principal es el externo**, y el lado de AV Matrix lleva **compensación de deriva** (calidad máxima): CoreAudio adapta los dos relojes;
+  - un IOProc copia los canales con `avm_bridge_render`: pone a cero todas las salidas del agregado, copia cada canal a su destino y hace un fundido de 256 muestras al arrancar. No reserva memoria ni espera; si la forma de los buffers no coincide con el plan, entrega silencio;
+  - el buffer del agregado es de 256 muestras;
+  - no se implementa el protocolo Dante: DVS se usa como dispositivo CoreAudio.
+- **Lógica portable** (`Client/avm_bridge_core.[ch]`, probada en Linux):
+  - `avm_bridge_evaluate` decide el estado y el mensaje: Detenido, Conectado, Desconectado, Falta AV Matrix, Frecuencias distintas, Configuración no válida, En pausa o Error;
+  - `avm_bridge_make_plan` traduce los canales al agregado y comprueba que los totales cuadran con el orden [AV Matrix, externo];
+  - `avm_bridge_render` hace la copia.
+- **Estados y avisos:** se escuchan la lista de dispositivos, `DeviceIsAlive` y la frecuencia nominal del externo y del dispositivo puente.
+  - Si DVS o la EVO desaparecen, o cambia una frecuencia, el puente **se detiene** (para el IOProc y destruye el agregado) y lo muestra.
+  - Al volver, **se reconecta con un agregado nuevo**: no se arrastra ningún buffer, y el motor aplica el mixer vigente desde la primera muestra (revisión 13).
+- **Frecuencias:** deben coincidir para arrancar. El botón **«Igualar frecuencia»** pone el externo a la frecuencia de AV Matrix (DVS puede negarse; se indica).
+  - Al cambiar la frecuencia **desde la app**, los puentes se pausan (si no, el driver rechazaría el cambio por audio activo), AV Matrix cambia y se intenta igualar el externo.
+- **Realimentación imposible por diseño:**
+  - el puente Dante solo lee Dante L/R y solo escribe en las salidas de DVS (pone a cero el resto);
+  - el puente EVO solo lee la EVO y solo escribe en EVO 1-4;
+  - se rechaza cualquier dispositivo de AV Matrix (UID `AVMatrix_`) o un agregado del usuario que lo contenga (`kAudioAggregateDevicePropertyFullSubDeviceList`);
+  - los dos puentes no pueden usar el mismo dispositivo.
+- **Canales:**
+  - Dante: L y R distintos y existentes en DVS (por defecto 1 y 2).
+  - EVO: cada fuente EVO 1-4 tiene su entrada (por defecto 1-4; «—» = ninguna). Si la EVO expone menos entradas, las que faltan quedan en silencio y el estado lo avisa.
+  - Nunca se mezclan canales automáticamente.
+- **Se conservan:**
+  - las rutas de Smaart y LISTENTO y la referencia local Salida 1 → Entrada 8;
+  - el preset de medición es idéntico y no usa EVO ni Dante. Los presets Medición y Directo **conservan las rutas hacia Dante** (`avm_matrix_copy_dst_group`; también en `avmctl preset`). «Vaciar» lo quita todo;
+  - la regla anti-lazo: LISTENTO Retorno → LISTENTO Envío sigue prohibido; hacia Dante se permite, porque no vuelve a entrar.
+- **Ajustes de la versión anterior:**
+  - el driver lee la matriz guardada de 16 × 18 bytes (`avm_matrix_from_bytes`) y el mixer de 18 + 16 canales (`avm_mixer_unpack`); los canales nuevos quedan vacíos y a 0 dB sin MUTE;
+  - los nombres personalizados conservan sus claves; se añaden `evo.in.1-4` y `dante.out.1-2`.
+- **App:**
+  - **matriz:** grupos «EVO» (transmisores) y «Dante» (receptores);
+  - **mixer:** grupos «EVO · Entradas USB» y «Dante · Hacia DVS», con medidor, fader hasta 0 dB y MUTE;
+  - **una fila por puente:** dispositivo (solo los externos, con sus canales reales), canales, Activar/Detener, punto de color, estado, «Igualar frecuencia» y, en Dante, «Conectar Música L/R»;
+  - la configuración se guarda en `NSUserDefaults` (`puente_dante`, `puente_evo`), y los puentes activos se reanudan al abrir la app;
+  - **permiso de micrófono:** `NSMicrophoneUsageDescription` y la petición con AVFoundation antes de activar;
+  - con un puente activo, cerrar la ventana no cierra la app (clic en el Dock la reabre); al salir, se destruyen los agregados.
+- **`avmctl`:**
+  - `status` muestra los 5 dispositivos;
+  - **`devices`** lista los dispositivos del Mac con sus entradas y salidas reales y su frecuencia, para comprobar la EVO y DVS;
+  - `show` incluye las columnas E1-E4 y las filas Dante, y hay tokens `evo.1-4` y `dante.L/R`;
+  - **fase 2e de `avmctl test`:** escribe directamente en «AV Matrix EVO (puente)» y lee «AV Matrix Dante (puente)», sin EVO ni DVS reales. Comprueba EVO 1-4 separadas hacia Smaart y LISTENTO, EVO 2 en MUTE, Dante L/R con R a −6 dB y la referencia local exacta.
+
+### 0.14.2 Pruebas
+
+| Prueba | Tipo | Qué comprueba |
+| --- | --- | --- |
+| `tests/test_evo_dante.c` (nueva, 36) | Linux (motor real), ASan y UBSan | Tamaños (22 fuentes, 18 destinos). Reglas: EVO hacia cualquier destino; cualquier fuente hacia Dante; se mantiene el bloqueo de LISTENTO. **Preset de medición idéntico** y sin EVO ni Dante; preset + rutas Dante conservadas. **Ajustes antiguos** (matriz de 288 bytes y mixer de 18 + 16) leídos correctamente. **Aislamiento de EVO 1-4** (cada una a su destino, ninguna fuga, suma solo si se pide). **Dante L/R** exactos y separados. **Volumen y MUTE** de Música y Dante, **MUTE desde la primera muestra** al empezar Dante. **EVO:** MUTE y −6 dB desde la primera muestra al conectarse, con la referencia local exacta; **desconexión** (300 bloques sin audio viejo); **reconexión** con valores nuevos y el mixer vigente; el hueco se lee como silencio. Medidores de EVO y Dante en `'metr'`. **Smaart y LISTENTO idénticos bit a bit** con música y EVO yendo a Dante |
+| `tests/test_bridge.c` (nueva, 52) | **Simulada** (Linux, sin CoreAudio) | Valores por defecto (Dante 1-2, EVO 1-4, detenidos). **Estados:** conectado a 44,1, 48 y 96 kHz; frecuencias distintas (44,1/48, 48/96); detenido; en pausa; falta el driver; sin dispositivo; dispositivo de AV Matrix o el mismo en los dos puentes (**realimentación**); **DVS desaparece**; L = R; canal 0, negativo o inexistente; **EVO de 2 entradas** (funciona y avisa); EVO desconectada; secuencia conectada → desconectada → otra frecuencia → conectada. **Plan:** Dante con DVS de 64 canales en un stream y en 64 streams mono, L/R invertidos; EVO en dos streams estéreo; totales inesperados rechazados. **Copia:** fundido de 256 muestras y después exacta; **L/R sin cruzarse**; las demás salidas a cero (sin basura previa); **EVO 1-4 separadas**; salidas propias de la EVO en silencio; reasignación; entradas inexistentes en silencio; entrada NULL. **Reconexión:** plan nuevo sin estado anterior, primera muestra casi en silencio y solo con audio nuevo |
+| `tests/test_bridge_static.sh` (nueva, 18) | Estática | Agregado privado; reloj = externo; deriva en AV Matrix; AV Matrix primero; rechazo de dispositivos y agregados de AV Matrix; el IOProc no reserva memoria; agregado nuevo en cada arranque; avisos de dispositivos, alive y frecuencia; permiso de micrófono (plist y petición); filtro de la lista; presets que conservan Dante; app viva con un puente activo; pausa al cambiar la frecuencia; configuración guardada; grupos en la matriz; dispositivos puente no por defecto; migración de la matriz. Mutación (sin deriva): detectada |
+| `tests/compare_engine_unity.sh` (actualizada) | Linux | Smaart y LISTENTO **idénticos bit a bit** a `fddbc62` y a `ea2e89f` (12,4 MB de audio y medidores). El volcado usa solo los canales antiguos, así compila con los dos motores |
+| `tests/test_names.c` (+9, 60) | Linux | 40 claves (las 34 anteriores no cambian); nombres y números de EVO 1-4 y Dante L/R; se pueden renombrar |
+| `tests/test_manual.c` (+51, 379) | Linux | Sección «Puentes: Dante Virtual Soundcard y EVO» con los temas pedidos; dispositivos, matriz, frecuencias, diagnóstico y limitaciones actualizados |
+| `tests/test_main_ui.m`, `test_mixer_ui.m` (actualizadas, nativas) | **Mac (sin ejecutar)** | Tamaño de la matriz con 26 columnas y 21 filas; columna EVO 1 y fila Dante L; filas de los puentes (dispositivo, 2 y 4 canales, Activar, «Conectar Música L/R»); ningún dispositivo de AV Matrix en la lista; 40 tiras en el mixer; EVO 1-4 y Dante L/R con fader y MUTE |
+| `avmctl test` fase 2e | **Mac con el driver nuevo, sin EVO ni DVS** (sin ejecutar) | Los dispositivos puente en el driver real |
+
+**Resultados (Linux):**
+
+| Suite | Resultado |
+| --- | --- |
+| Núcleo | 122/122 |
+| Frecuencia | 115/115 |
+| Medidores | 117/117 |
+| Nombres | 60/60 |
+| Manual | 379/379 |
+| Mixer | 99/99 |
+| Faders | 17/17 |
+| **EVO y Dante** | **36/36** |
+| **Puentes (simulados)** | **52/52** |
+| **Puentes (estático)** | **18/18** |
+| Guardado | 13/13 |
+| Veredicto | 8/8 |
+| avmctl | 8/8 |
+| Instalador | 102/102 |
+| `build.sh` | 34/34 |
+| Textos | 36/36 |
+
+Motor a 0 dB idéntico a `fddbc62` y a `ea2e89f`. Sanitizers sin avisos. Compilación cruzada sin avisos.
+
+**Para revisar con atención:**
+1. **Orden de los canales en el agregado:** el plan supone que CoreAudio numera los canales por subdispositivo en el orden de la lista [AV Matrix, externo], y lo verifica comparando totales. Si una versión de macOS ordenara distinto, el puente no arrancaría (error claro) en vez de copiar mal.
+2. **Reloj y deriva:** se usa la compensación de deriva de CoreAudio en el lado de AV Matrix con el externo como reloj. No se ha medido la deriva ni el retardo reales con DVS o la EVO.
+3. **Permiso de micrófono:** la app ad hoc pide el permiso con AVFoundation. Si macOS lo deniega, el agregado entregaría silencio; la app avisa antes de activar.
+4. **Mientras un puente está activo**, los dispositivos puente tienen audio abierto, así que el driver rechaza un cambio de frecuencia pedido desde Smaart. Desde la app se pausan los puentes primero.
+5. **Los puentes viven en la app:** si se sale de la app, el envío a Dante y la recepción de la EVO se detienen. Con la ventana cerrada siguen funcionando.
+
+**Pendiente en el Mac** (lista en `INSTALAR.md`): `build.sh` y la instalación completa; `avmctl status`, `devices` y `test` (fase 2e); Dante con DVS real a 48 kHz (L/R, volumen, MUTE desde la primera muestra, detener e iniciar DVS); la EVO real (entradas reales, aislamiento de 1-4, desconexión del USB); 44,1 y 96 kHz si DVS y la EVO lo admiten; Smaart y LISTENTO exactos con los puentes activos.
+
+## 0octies. Revisión 13 — mixer: arranque con MUTE, guardado ordenado y veredicto de la autoprueba (sobre `ee604ad`)
 
 Codex revisó `ee604ad` y encontró tres problemas. Antes de modificar se hizo una copia de seguridad del proyecto en `ee604ad`. **No se instaló nada ni se reinició coreaudiod.** Cambian el motor, el driver y `avmctl`: hay que instalar con `install.sh` completo, no con `--app-only`.
 

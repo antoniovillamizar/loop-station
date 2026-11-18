@@ -39,6 +39,8 @@ Al final debe decir **«Prueba en seco correcta»**. Si sale **ERROR**, para aqu
 
 La instalación reinicia el servicio de audio de macOS (`coreaudiod`), y **todo el audio del Mac se corta unos segundos**. Cierra también Spotify, Tidal, tu DAW y cualquier otra app de audio.
 
+> **Revisión 14 (puentes Dante y EVO): esta versión cambia el driver** (dos dispositivos nuevos y más canales en la matriz). Instálala con `scripts/install.sh` completo, **no** con `--app-only`.
+>
 > **Revisión 12 (mixer): esta versión cambia el driver.** Instálala con `scripts/install.sh` completo (pasos 3 y 4), **no** con `--app-only`. Al instalar se reinicia coreaudiod.
 
 ## 4. Instalar
@@ -105,6 +107,19 @@ Anota lo que observes:
 - [ ] MUTE en **Smaart Entrada 8**: ¿Smaart deja de ver la referencia? Quita el MUTE: ¿vuelve al nivel anterior?
 - [ ] «Silenciar todos» y después «Restaurar 0 dB y quitar mutes…»: ¿se silencia todo y vuelve todo a 0 dB (con confirmación)?
 - [ ] Cierra la app y reinicia el Mac: ¿se conservan los ajustes del mixer?
+
+### Puentes Dante y EVO (revisión 14; instalación completa)
+
+- [ ] `avmctl status`: ¿aparecen los cinco dispositivos, incluidos «AV Matrix Dante (puente)» y «AV Matrix EVO (puente)»?
+- [ ] `avmctl test`: ¿salen OK las líneas «puentes:» (EVO 1-4 separadas, EVO 2 en MUTE, Dante L/R con R a −6 dB, referencia local intacta)? (Sin EVO ni DVS reales.)
+- [ ] `avmctl devices` con la EVO conectada: ¿cuántas entradas expone de verdad? Anótalo.
+- [ ] Dante a 48 kHz: inicia Dante Virtual Soundcard, en la app elige DVS, L = 1, R = 2, pulsa «Conectar Música L/R» y «Activar» (acepta el permiso de micrófono). ¿Llega la música a la consola, L y R separados? ¿Bajan Música L/R y Dante L/R en el Mixer sin chasquidos?
+- [ ] Con Dante activo: MUTE en Dante L antes de iniciar la música: ¿silencio desde el principio?
+- [ ] Detén DVS en su programa: ¿el estado pasa a «Desconectado» sin ruidos? Inícialo de nuevo: ¿se reconecta solo sin audio viejo?
+- [ ] EVO a 48 kHz: elige la EVO y «Activar». ¿Los medidores EVO 1-4 responden cada uno a su entrada, sin mezclarse? Conecta EVO 1 a una entrada de Smaart y comprueba el nivel.
+- [ ] Desconecta el USB de la EVO: ¿«Desconectado»? Reconéctalo: ¿vuelve solo, sin audio viejo?
+- [ ] Repite a 44,1 y 96 kHz si DVS y la EVO lo admiten (cambia la frecuencia desde la app).
+- [ ] Con los puentes activos, ¿siguen exactos Smaart (medición, referencia Salida 1 → Entrada 8) y LISTENTO?
 
 ## 7. Al terminar
 

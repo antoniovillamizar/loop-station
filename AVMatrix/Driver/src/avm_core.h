@@ -4,8 +4,10 @@
 // en cualquier sistema. El driver HAL (AVMatrixDriver.c) lo usa en el hilo de IO.
 //
 // Modelo:
-//   Fuentes (18):   salidas de Smaart 1-8, salidas de LISTENTO 1-8, Música L/R.
-//   Destinos (16):  entradas de Smaart 1-8, entradas de LISTENTO 1-8.
+//   Fuentes (22):   salidas de Smaart 1-8, salidas de LISTENTO 1-8, Música L/R,
+//                   EVO 1-4 (entradas USB de la EVO, por el puente de la app).
+//   Destinos (18):  entradas de Smaart 1-8, entradas de LISTENTO 1-8,
+//                   Dante L/R (hacia Dante Virtual Soundcard, por el puente).
 //   Cada cruce de la matriz es 0 (abierto) o 1 (conectado a ganancia unidad).
 //   Mixer: cada fuente y cada destino tienen un volumen que SOLO atenúa
 //   (de 0 dB a silencio, sin amplificación) y un MUTE. El de la fuente actúa
@@ -33,30 +35,41 @@ extern "C" {
 
 #define AVM_CHANNELS_PER_PORT  8
 #define AVM_MUSIC_CHANNELS     2
+#define AVM_EVO_CHANNELS       4
+#define AVM_DANTE_CHANNELS     2
 
 // Grupos de fuentes (lo que las aplicaciones envían AL driver).
 typedef enum {
     AVM_SRC_GROUP_SMAART  = 0,  // salidas del dispositivo "Smaart"
     AVM_SRC_GROUP_LINK    = 1,  // salidas del dispositivo "LISTENTO" (retorno de Colombia)
     AVM_SRC_GROUP_MUSIC   = 2,  // salida estéreo del dispositivo "Música"
-    AVM_SRC_GROUP_COUNT   = 3
+    AVM_SRC_GROUP_EVO     = 3,  // salidas del dispositivo "EVO (puente)": entradas USB de la EVO
+    AVM_SRC_GROUP_COUNT   = 4
 } avm_src_group;
 
 // Grupos de destinos (lo que las aplicaciones reciben DEL driver).
 typedef enum {
     AVM_DST_GROUP_SMAART  = 0,  // entradas del dispositivo "Smaart"
     AVM_DST_GROUP_LINK    = 1,  // entradas del dispositivo "LISTENTO" (envío a Colombia)
-    AVM_DST_GROUP_COUNT   = 2
+    AVM_DST_GROUP_DANTE   = 2,  // entradas del dispositivo "Dante (puente)": hacia DVS
+    AVM_DST_GROUP_COUNT   = 3
 } avm_dst_group;
 
 #define AVM_SRC_SMAART_BASE    0
 #define AVM_SRC_LINK_BASE      8
 #define AVM_SRC_MUSIC_BASE     16
-#define AVM_NUM_SOURCES        18
+#define AVM_SRC_EVO_BASE       18
+#define AVM_NUM_SOURCES        22
 
 #define AVM_DST_SMAART_BASE    0
 #define AVM_DST_LINK_BASE      8
-#define AVM_NUM_DESTS          16
+#define AVM_DST_DANTE_BASE     16
+#define AVM_NUM_DESTS          18
+
+// Tamaños de la versión anterior (sin EVO ni Dante), para leer ajustes
+// guardados por ella: matriz de 16 x 18 y mixer de 18 + 16 canales.
+#define AVM_LEGACY_NUM_SOURCES 18
+#define AVM_LEGACY_NUM_DESTS   16
 
 // Entrada 8 de Smaart: REFERENCIA LOCAL en el preset de medición.
 // Recibe solo Smaart Salida 1 (el generador), nunca el retorno 8 de LISTENTO.
@@ -226,6 +239,13 @@ void avm_matrix_default(avm_matrix* m);
 void avm_matrix_direct(avm_matrix* m);
 // Devuelve true si la matriz no contiene cruces prohibidos ni valores distintos de 0/1.
 bool avm_matrix_is_valid(const avm_matrix* m);
+// Copia en `dst` las filas de un grupo de destinos tomadas de `src` (p. ej. los
+// presets de medición conservan las rutas hacia Dante que ya había).
+void avm_matrix_copy_dst_group(avm_matrix* dst, const avm_matrix* src, avm_dst_group g);
+// Lee una matriz guardada: tamaño actual (18 x 22 bytes) o de la versión anterior
+// (16 x 18: sin EVO ni Dante; las filas y columnas nuevas quedan vacías).
+// Devuelve false si el tamaño no es ninguno de los dos.
+bool avm_matrix_from_bytes(const uint8_t* data, size_t len, avm_matrix* out);
 
 // --- Mixer -------------------------------------------------------------------
 // Todos los canales a 0 dB y sin mute (estado de una instalación nueva).
@@ -246,7 +266,10 @@ float avm_gain_to_db(float gain);
 // Serialización para la propiedad 'mixr' del driver y su almacenamiento.
 // Formato: cabecera 16 bytes ('AVX1', n fuentes, n destinos, 0) y 8 bytes por
 // canal (float ganancia, uint8 mute, 3 bytes a 0), fuentes y luego destinos.
+// avm_mixer_unpack también acepta el formato de la versión anterior (18
+// fuentes y 16 destinos): los canales nuevos (EVO, Dante) quedan a 0 dB sin mute.
 #define AVM_MIXER_BLOB_SIZE (16u + 8u * (AVM_NUM_SOURCES + AVM_NUM_DESTS))
+#define AVM_MIXER_LEGACY_BLOB_SIZE (16u + 8u * (AVM_LEGACY_NUM_SOURCES + AVM_LEGACY_NUM_DESTS))
 void avm_mixer_pack(const avm_mixer* mx, uint8_t out[AVM_MIXER_BLOB_SIZE]);
 // Devuelve false (y no modifica *mx) si el tamaño, la cabecera o algún valor no es válido.
 bool avm_mixer_unpack(const uint8_t* blob, size_t len, avm_mixer* mx);

@@ -58,7 +58,8 @@ static int cmd_status(void)
         printf(" (id %u)\n", (unsigned)d);
         for (int dir = 0; dir < 2; dir++) {
             bool input = dir == 0;
-            if (k == AVM_DEV_MUSIC && input) continue;
+            if ((k == AVM_DEV_MUSIC || k == AVM_DEV_EVO) && input) continue;
+            if (k == AVM_DEV_DANTE && !input) continue;
             AudioStreamBasicDescription asbd;
             if (avm_get_physical_format((avm_device_kind)k, input, &asbd) == noErr) {
                 int f = avm_format_from_asbd(&asbd);
@@ -75,7 +76,7 @@ static int cmd_status(void)
         else if (h == AVM_RATE_HEALTH_INCONSISTENT) {
             printf("Frecuencia: INCONSISTENTE. El audio no arranca hasta recuperar: avmctl recover\n");
             ok = 0;
-        } else printf("Frecuencia: coherente en los tres dispositivos\n");
+        } else printf("Frecuencia: coherente en los cinco dispositivos\n");
     }
     return ok ? 0 : 1;
 }
@@ -90,7 +91,8 @@ static int cmd_show(void)
     for (int s = 0; s < AVM_NUM_SOURCES; s++) {
         if (s < AVM_SRC_LINK_BASE) printf(" S%d", s + 1);
         else if (s < AVM_SRC_MUSIC_BASE) printf(" L%d", s - AVM_SRC_LINK_BASE + 1);
-        else printf(" M%s", s == AVM_SRC_MUSIC_BASE ? "L" : "R");
+        else if (s < AVM_SRC_EVO_BASE) printf(" M%s", s == AVM_SRC_MUSIC_BASE ? "L" : "R");
+        else printf(" E%d", s - AVM_SRC_EVO_BASE + 1);
     }
     printf("\n");
     for (int d = 0; d < AVM_NUM_DESTS; d++) {
@@ -106,7 +108,7 @@ static int cmd_show(void)
         if (n > 1) printf("   suma de %d fuentes", n);
         printf("\n");
     }
-    printf("\nS = Smaart salida, L = LISTENTO retorno, M = Música.  ● conectado  · libre  × prohibido (lazo)\n");
+    printf("\nS = Smaart salida, L = LISTENTO retorno, M = Música, E = EVO.  ● conectado  · libre  × prohibido (lazo)\n");
     return 0;
 }
 
@@ -135,6 +137,9 @@ static int cmd_preset(const char* which)
     else if (strcasecmp(which, "direct") == 0) avm_matrix_direct(&m);
     else if (strcasecmp(which, "clear") == 0) avm_matrix_clear(&m);
     else { fprintf(stderr, "Preset desconocido: %s (default | direct | clear)\n", which); return 2; }
+    // Los presets de medición conservan las rutas hacia Dante (como en la app).
+    avm_matrix cur;
+    if (strcasecmp(which, "clear") != 0 && avm_get_matrix(&cur) == noErr) avm_matrix_copy_dst_group(&m, &cur, AVM_DST_GROUP_DANTE);
     OSStatus err = avm_set_matrix(&m);
     if (err) { print_err("escribir matriz", err); return 1; }
     return cmd_show();
@@ -256,18 +261,21 @@ static int cmd_format(const char* dev, const char* dir, const char* fmt)
 #define T_SMAART  0
 #define T_LINK    1
 #define T_MUSIC   2
+#define T_DANTE   3   // puente: entradas Dante L/R (lo que la app envía a DVS)
+#define T_EVO     4   // puente: salidas EVO 1-4 (lo que la app recibe de la EVO)
 
 static float val_smaart(int c) { return (float)(c + 1) / 64.0f; }
 static float val_link(int c)   { return -(float)(c + 1) / 64.0f; }
+static float val_evo(int c)    { return (float)(c + 9) / 64.0f; }     // 9/64 .. 12/64: distintos de los demás
 static const float kMusicL = 0.375f, kMusicR = -0.4375f;
 
 typedef struct {
     int             mode;               // 0 = valores constantes, 1 = impulso
     Float64         rate;
-    Float64         first_in[3];        // primera sample time de entrada vista por dispositivo
-    _Atomic long    correct[2][8];
-    _Atomic long    silent[2][8];
-    _Atomic long    wrong[2][8];
+    Float64         first_in[5];        // primera sample time de entrada vista por dispositivo
+    _Atomic long    correct[3][8];      // [Smaart, LISTENTO, Dante][canal]
+    _Atomic long    silent[3][8];
+    _Atomic long    wrong[3][8];
     // impulso
     Float64         first_out;
     _Atomic int     impulse_sent;
@@ -346,6 +354,40 @@ static float expected_start(int dev, int c)
     return c == 1 ? val_smaart(1) * 0.5f : 0.0f;
 }
 
+// Fase de los puentes (modo 5), sin la EVO ni DVS reales: la autoprueba
+// escribe directamente en «AV Matrix EVO (puente)» y lee «AV Matrix Dante
+// (puente)», como hará la app. Comprueba los 4 canales EVO por separado, Dante
+// L/R, y que la referencia local Salida 1 -> Entrada 8 sigue intacta.
+//   smaart.in.1-4   <- evo.1-4        (EVO 2 en MUTE: smaart.in.2 = 0)
+//   listento.in.2-5 <- evo.1-4        (EVO 2 en MUTE: listento.in.3 = 0)
+//   listento.in.1   <- smaart.out.1
+//   smaart.in.8     <- smaart.out.1   (referencia local)
+//   dante.L         <- music.L
+//   dante.R         <- music.R        (Dante R a −6 dB)
+static void bridges_phase(avm_matrix* m, avm_mixer* mx)
+{
+    avm_matrix_clear(m);
+    for (int k = 0; k < 4; k++) {
+        m->cell[AVM_DST_SMAART_BASE + k][AVM_SRC_EVO_BASE + k] = 1;
+        m->cell[AVM_DST_LINK_BASE + 1 + k][AVM_SRC_EVO_BASE + k] = 1;
+    }
+    m->cell[AVM_DST_LINK_BASE + 0][AVM_SRC_SMAART_BASE + 0] = 1;
+    m->cell[AVM_DST_LOCAL_REFERENCE][AVM_SRC_GENERATOR] = 1;
+    m->cell[AVM_DST_DANTE_BASE + 0][AVM_SRC_MUSIC_BASE + 0] = 1;
+    m->cell[AVM_DST_DANTE_BASE + 1][AVM_SRC_MUSIC_BASE + 1] = 1;
+    avm_mixer_default(mx);
+    mx->src_mute[AVM_SRC_EVO_BASE + 1] = 1;
+    mx->dst_gain[AVM_DST_DANTE_BASE + 1] = 0.5f;
+}
+
+static float expected_bridges(int dev, int c)
+{
+    if (dev == T_SMAART) return c < 4 ? (c == 1 ? 0.0f : val_evo(c)) : c == 7 ? val_smaart(0) : 0.0f;
+    if (dev == T_LINK)   return c == 0 ? val_smaart(0) : (c >= 1 && c <= 4) ? (c == 2 ? 0.0f : val_evo(c - 1)) : 0.0f;
+    if (dev == T_DANTE)  return c == 0 ? kMusicL : c == 1 ? kMusicR * 0.5f : 0.0f;
+    return 0.0f;
+}
+
 static float expected_in(int dev, int c)
 {
     if (dev == T_LINK) return val_smaart(c);           // smaart.out.N -> listento.in.N
@@ -364,7 +406,8 @@ static void classify_input(int dev, const AudioBufferList* in, const AudioTimeSt
     UInt32 nch = in->mBuffers[0].mNumberChannels;
     UInt32 frames = in->mBuffers[0].mDataByteSize / (sizeof(float) * (nch ? nch : 1));
     if (g_t.first_in[dev] < 0) g_t.first_in[dev] = t->mSampleTime;
-    int di = dev == T_LINK ? 1 : 0;
+    int di = dev == T_LINK ? 1 : dev == T_DANTE ? 2 : 0;
+    if (dev == T_DANTE && g_t.mode != 5) return;   // el puente Dante solo se mira en su fase
 
     if (g_t.mode == 4) {
         // Sin calentamiento: se mira desde la primera muestra recibida.
@@ -377,11 +420,12 @@ static void classify_input(int dev, const AudioBufferList* in, const AudioTimeSt
             }
         return;
     }
-    if (g_t.mode == 0 || g_t.mode == 3) {
+    if (g_t.mode == 0 || g_t.mode == 3 || g_t.mode == 5) {
         if (t->mSampleTime < g_t.first_in[dev] + 1.5 * g_t.rate) return;  // calentamiento
         for (UInt32 f = 0; f < frames; f++)
             for (UInt32 c = 0; c < nch && c < 8; c++) {
-                float v = p[f * nch + c], e = g_t.mode == 3 ? expected_mixer(dev, (int)c) : expected_in(dev, (int)c);
+                float v = p[f * nch + c];
+                float e = g_t.mode == 3 ? expected_mixer(dev, (int)c) : g_t.mode == 5 ? expected_bridges(dev, (int)c) : expected_in(dev, (int)c);
                 if (v == e) atomic_fetch_add(&g_t.correct[di][c], 1);
                 else if (v == 0.0f) atomic_fetch_add(&g_t.silent[di][c], 1);
                 else atomic_fetch_add(&g_t.wrong[di][c], 1);
@@ -406,11 +450,12 @@ static void fill_output(int dev, AudioBufferList* out, const AudioTimeStamp* t)
     UInt32 frames = out->mBuffers[0].mDataByteSize / (sizeof(float) * (nch ? nch : 1));
     memset(p, 0, out->mBuffers[0].mDataByteSize);
 
-    if (g_t.mode == 0 || g_t.mode == 3 || g_t.mode == 4) {
+    if (g_t.mode == 0 || g_t.mode == 3 || g_t.mode == 4 || g_t.mode == 5) {
         for (UInt32 f = 0; f < frames; f++)
             for (UInt32 c = 0; c < nch; c++)
                 p[f * nch + c] = dev == T_SMAART ? val_smaart((int)c)
                                : dev == T_LINK   ? val_link((int)c)
+                               : dev == T_EVO    ? val_evo((int)c)
                                : (c == 0 ? kMusicL : kMusicR);
     } else if (g_t.mode == 2) {
         if (dev == T_SMAART)
@@ -433,29 +478,31 @@ static OSStatus io_proc(AudioObjectID dev, const AudioTimeStamp* now, const Audi
 {
     (void)dev; (void)now;
     int which = (int)(intptr_t)client;
-    if (which != T_MUSIC && g_t.mode != 2) classify_input(which, in, inTime);
+    if (which != T_MUSIC && which != T_EVO && g_t.mode != 2) classify_input(which, in, inTime);
     fill_output(which, out, outTime);
     return noErr;
 }
 
-// Abre los tres dispositivos `seconds` segundos. Si `during` no es NULL, se
-// llama justo antes de detenerlos (con el audio aún en marcha).
+// Abre los tres dispositivos (cinco con los puentes, en la fase 5) `seconds`
+// segundos. Si `during` no es NULL, se llama justo antes de detenerlos.
 static int run_devices(double seconds, void (*during)(void))
 {
-    AudioObjectID devs[3] = { avm_find_device(AVM_DEV_SMAART), avm_find_device(AVM_DEV_LISTENTO), avm_find_device(AVM_DEV_MUSIC) };
-    AudioDeviceIOProcID ids[3] = { 0 };
+    AudioObjectID devs[5] = { avm_find_device(AVM_DEV_SMAART), avm_find_device(AVM_DEV_LISTENTO), avm_find_device(AVM_DEV_MUSIC),
+                              avm_find_device(AVM_DEV_DANTE), avm_find_device(AVM_DEV_EVO) };
+    AudioDeviceIOProcID ids[5] = { 0 };
+    const int n = g_t.mode == 5 ? 5 : 3;
     int ok = 1;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < n; i++) {
         OSStatus err = AudioDeviceCreateIOProcID(devs[i], io_proc, (void*)(intptr_t)i, &ids[i]);
         if (err) { print_err("crear IOProc", err); ok = 0; break; }
     }
-    for (int i = 0; ok && i < 3; i++) {
+    for (int i = 0; ok && i < n; i++) {
         OSStatus err = AudioDeviceStart(devs[i], ids[i]);
         if (err) { print_err("arrancar dispositivo", err); ok = 0; }
     }
     if (ok) usleep((useconds_t)(seconds * 1e6));
     if (ok && during) during();
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < n; i++) {
         if (ids[i]) {
             AudioDeviceStop(devs[i], ids[i]);
             AudioDeviceDestroyIOProcID(devs[i], ids[i]);
@@ -505,7 +552,7 @@ static void reset_ctx(int mode, Float64 rate)
     memset(&g_t, 0, sizeof(g_t));
     g_t.mode = mode;
     g_t.rate = rate;
-    for (int i = 0; i < 3; i++) g_t.first_in[i] = -1;
+    for (int i = 0; i < 5; i++) g_t.first_in[i] = -1;
     g_t.first_out = -1;
 }
 
@@ -708,6 +755,33 @@ static int run_test_once(int verbose)
         if (verbose || !good)
             printf("  %-6s arranque: %s: %ld exactas, %ld con otro valor\n", good ? "OK" : "FALLO", sc[k].what, ok, w);
     }
+    // 2e) Puentes (sin EVO ni DVS reales): EVO 1-4 por separado hacia Smaart y
+    // LISTENTO con EVO 2 en MUTE; Música L/R hacia Dante L/R con Dante R a −6 dB;
+    // la referencia local Salida 1 -> Entrada 8 sigue exacta.
+    if (avm_find_device(AVM_DEV_DANTE) == kAudioObjectUnknown || avm_find_device(AVM_DEV_EVO) == kAudioObjectUnknown) {
+        printf("  FALLO  no están los dispositivos puente (Dante y EVO): instale el driver nuevo\n");
+        pass = 0;
+    } else {
+        bridges_phase(&m, &mx);
+        if ((err = avm_set_matrix(&m))) { print_err("escribir matriz de prueba", err); avm_set_mixer(&unity); return 0; }
+        if ((err = avm_set_mixer(&mx))) { print_err("escribir mixer de prueba", err); avm_set_mixer(&unity); return 0; }
+        reset_ctx(5, rate);
+        if (!run_devices(3.0, NULL)) { avm_set_mixer(&unity); return 0; }
+        const char* bn[3][8] = {
+            { "Smaart entrada 1 <- EVO 1", "Smaart entrada 2 <- EVO 2 (MUTE)", "Smaart entrada 3 <- EVO 3", "Smaart entrada 4 <- EVO 4",
+              "Smaart entrada 5 (sin ruta)", "Smaart entrada 6 (sin ruta)", "Smaart entrada 7 (sin ruta)", "Smaart entrada 8 = referencia local" },
+            { "LISTENTO envío 1 <- Smaart salida 1", "LISTENTO envío 2 <- EVO 1", "LISTENTO envío 3 <- EVO 2 (MUTE)", "LISTENTO envío 4 <- EVO 3",
+              "LISTENTO envío 5 <- EVO 4", "LISTENTO envío 6 (sin ruta)", "LISTENTO envío 7 (sin ruta)", "LISTENTO envío 8 (sin ruta)" },
+            { "Dante L <- Música L", "Dante R <- Música R (−6 dB)", "", "", "", "", "", "" } };
+        for (int di = 0; di < 3; di++)
+            for (int c = 0; c < (di == 2 ? 2 : 8); c++) {
+                long ok = atomic_load(&g_t.correct[di][c]), z = atomic_load(&g_t.silent[di][c]), w = atomic_load(&g_t.wrong[di][c]);
+                int good = ok > 0 && z == 0 && w == 0;
+                if (!good) pass = 0;
+                if (verbose || !good)
+                    printf("  %-6s puentes: %s: %ld correctas, %ld en silencio, %ld distintas\n", good ? "OK" : "FALLO", bn[di][c], ok, z, w);
+            }
+    }
     if ((merr = avm_set_mixer(&unity))) { print_err("poner el mixer a 0 dB", merr); pass = 0; }
 
     // 3) Retardo de transporte con un impulso (informativo; no es un objetivo de latencia).
@@ -795,6 +869,21 @@ static int cmd_test(int all)
 }
 
 // ---------------------------------------------------------------------------
+// Dispositivos del Mac (para elegir la EVO y Dante Virtual Soundcard)
+
+static int cmd_devices(void)
+{
+    avm_hw_device d[64];
+    int n = avm_list_hw_devices(d, 64);
+    printf("%-44s %8s %8s %10s\n", "Dispositivo", "entradas", "salidas", "frecuencia");
+    for (int i = 0; i < n; i++)
+        printf("%-44.44s %8u %8u %8.1f kHz%s%s\n", d[i].name, (unsigned)d[i].in_channels, (unsigned)d[i].out_channels,
+               d[i].rate / 1000.0, d[i].is_avmatrix ? "  (AV Matrix)" : "", d[i].alive ? "" : "  NO DISPONIBLE");
+    printf("UID: use estos nombres en la app (puentes Dante y EVO).\n");
+    return n > 0 ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
 // Mixer
 
 static void print_gain(float g, int mute)
@@ -859,11 +948,12 @@ static void usage(void)
            "  avmctl recover\n"
            "  avmctl meters [--watch]\n"
            "  avmctl mixer [reset | gain <canal> <dB|-inf> | mute <canal> on|off]\n"
+           "  avmctl devices                       (dispositivos del Mac: EVO, Dante Virtual Soundcard…)\n"
            "  avmctl format <smaart|listento|music> <in|out> <f32|s32|s24|s16>\n"
            "  avmctl test\n"
            "  avmctl test-all\n\n"
-           "Fuentes:  smaart.out.1-8  listento.out.1-8  music.L  music.R\n"
-           "Destinos: smaart.in.1-8   listento.in.1-8\n");
+           "Fuentes:  smaart.out.1-8  listento.out.1-8  music.L  music.R  evo.1-4\n"
+           "Destinos: smaart.in.1-8   listento.in.1-8   dante.L  dante.R\n");
 }
 
 int main(int argc, char** argv)
@@ -876,6 +966,7 @@ int main(int argc, char** argv)
     if (argc < 2) { usage(); return 2; }
     const char* c = argv[1];
     if (!strcmp(c, "status")) return cmd_status();
+    if (!strcmp(c, "devices")) return cmd_devices();
     if (!require_installed()) return 1;
     if (!strcmp(c, "show")) return cmd_show();
     if (!strcmp(c, "connect") && argc == 4) return cmd_connect(argv[2], argv[3], 1);

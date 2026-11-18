@@ -16,6 +16,7 @@ int avm_src_group_base(avm_src_group g)
         case AVM_SRC_GROUP_SMAART: return AVM_SRC_SMAART_BASE;
         case AVM_SRC_GROUP_LINK:   return AVM_SRC_LINK_BASE;
         case AVM_SRC_GROUP_MUSIC:  return AVM_SRC_MUSIC_BASE;
+        case AVM_SRC_GROUP_EVO:    return AVM_SRC_EVO_BASE;
         default:                   return -1;
     }
 }
@@ -26,6 +27,7 @@ int avm_src_group_channels(avm_src_group g)
         case AVM_SRC_GROUP_SMAART: return AVM_CHANNELS_PER_PORT;
         case AVM_SRC_GROUP_LINK:   return AVM_CHANNELS_PER_PORT;
         case AVM_SRC_GROUP_MUSIC:  return AVM_MUSIC_CHANNELS;
+        case AVM_SRC_GROUP_EVO:    return AVM_EVO_CHANNELS;
         default:                   return 0;
     }
 }
@@ -35,6 +37,7 @@ int avm_dst_group_base(avm_dst_group g)
     switch (g) {
         case AVM_DST_GROUP_SMAART: return AVM_DST_SMAART_BASE;
         case AVM_DST_GROUP_LINK:   return AVM_DST_LINK_BASE;
+        case AVM_DST_GROUP_DANTE:  return AVM_DST_DANTE_BASE;
         default:                   return -1;
     }
 }
@@ -44,12 +47,14 @@ int avm_dst_group_channels(avm_dst_group g)
     switch (g) {
         case AVM_DST_GROUP_SMAART: return AVM_CHANNELS_PER_PORT;
         case AVM_DST_GROUP_LINK:   return AVM_CHANNELS_PER_PORT;
+        case AVM_DST_GROUP_DANTE:  return AVM_DANTE_CHANNELS;
         default:                   return 0;
     }
 }
 
 avm_src_group avm_src_group_of(int src)
 {
+    if (src >= AVM_SRC_EVO_BASE)   return AVM_SRC_GROUP_EVO;
     if (src >= AVM_SRC_MUSIC_BASE) return AVM_SRC_GROUP_MUSIC;
     if (src >= AVM_SRC_LINK_BASE)  return AVM_SRC_GROUP_LINK;
     return AVM_SRC_GROUP_SMAART;
@@ -64,7 +69,9 @@ avm_route_status avm_route_allowed(int dst, int src)
         return AVM_ROUTE_OUT_OF_RANGE;
     // El retorno que llega por LISTENTO nunca puede volver a enviarse por
     // LISTENTO: formaría un lazo de realimentación a través de Colombia.
-    if (dst >= AVM_DST_LINK_BASE && src >= AVM_SRC_LINK_BASE && src < AVM_SRC_MUSIC_BASE)
+    // (Hacia Dante sí puede ir: Dante no vuelve a entrar en AV Matrix.)
+    if (dst >= AVM_DST_LINK_BASE && dst < AVM_DST_DANTE_BASE
+        && src >= AVM_SRC_LINK_BASE && src < AVM_SRC_MUSIC_BASE)
         return AVM_ROUTE_FORBIDDEN_FEEDBACK;
     return AVM_ROUTE_OK;
 }
@@ -100,6 +107,29 @@ bool avm_matrix_is_valid(const avm_matrix* m)
             if (v && avm_route_allowed(d, s) != AVM_ROUTE_OK) return false;
         }
     return true;
+}
+
+void avm_matrix_copy_dst_group(avm_matrix* dst, const avm_matrix* src, avm_dst_group g)
+{
+    int base = avm_dst_group_base(g), n = avm_dst_group_channels(g);
+    for (int d = base; d >= 0 && d < base + n; d++)
+        memcpy(dst->cell[d], src->cell[d], sizeof(dst->cell[d]));
+}
+
+bool avm_matrix_from_bytes(const uint8_t* data, size_t len, avm_matrix* out)
+{
+    if (data == NULL) return false;
+    if (len == sizeof(out->cell)) {
+        memcpy(out->cell, data, sizeof(out->cell));
+        return true;
+    }
+    if (len == (size_t)AVM_LEGACY_NUM_DESTS * AVM_LEGACY_NUM_SOURCES) {
+        avm_matrix_clear(out);
+        for (int d = 0; d < AVM_LEGACY_NUM_DESTS; d++)
+            memcpy(out->cell[d], data + (size_t)d * AVM_LEGACY_NUM_SOURCES, AVM_LEGACY_NUM_SOURCES);
+        return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -410,17 +440,20 @@ void avm_mixer_pack(const avm_mixer* mx, uint8_t out[AVM_MIXER_BLOB_SIZE])
 
 bool avm_mixer_unpack(const uint8_t* blob, size_t len, avm_mixer* mx)
 {
-    if (blob == NULL || len != AVM_MIXER_BLOB_SIZE || memcmp(blob, "AVX1", 4) != 0
-        || avm_get_u32(blob + 4) != AVM_NUM_SOURCES || avm_get_u32(blob + 8) != AVM_NUM_DESTS
-        || avm_get_u32(blob + 12) != 0)
+    if (blob == NULL || len < 16 || memcmp(blob, "AVX1", 4) != 0 || avm_get_u32(blob + 12) != 0)
         return false;
+    uint32_t ns = avm_get_u32(blob + 4), nd = avm_get_u32(blob + 8);
+    bool current = ns == AVM_NUM_SOURCES && nd == AVM_NUM_DESTS && len == AVM_MIXER_BLOB_SIZE;
+    bool legacy = ns == AVM_LEGACY_NUM_SOURCES && nd == AVM_LEGACY_NUM_DESTS && len == AVM_MIXER_LEGACY_BLOB_SIZE;
+    if (!current && !legacy) return false;
     avm_mixer t;
+    avm_mixer_default(&t);   // canales que la versión anterior no tenía: 0 dB sin mute
     const uint8_t* p = blob + 16;
-    for (int i = 0; i < AVM_NUM_SOURCES; i++, p += 8) {
+    for (int i = 0; i < (int)ns; i++, p += 8) {
         memcpy(&t.src_gain[i], p, 4); t.src_mute[i] = p[4];
         if (p[5] || p[6] || p[7]) return false;
     }
-    for (int i = 0; i < AVM_NUM_DESTS; i++, p += 8) {
+    for (int i = 0; i < (int)nd; i++, p += 8) {
         memcpy(&t.dst_gain[i], p, 4); t.dst_mute[i] = p[4];
         if (p[5] || p[6] || p[7]) return false;
     }

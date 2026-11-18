@@ -25,6 +25,9 @@ check "se ejecutan las pruebas de frecuencia (2 resultados en total)" [ "$(grep 
 check "las pruebas del instalador se ejecutan una sola vez" [ "$(grep -c '^Instalador: ' "$LOG")" -eq 1 ]
 check "se generan driver, app y avmctl" [ -f "$OUT/mac/AVMatrix.driver/Contents/MacOS/AVMatrix" ] && [ -f "$OUT/mac/AV Matrix.app/Contents/MacOS/AVMatrix" ] && [ -f "$OUT/mac/avmctl" ]
 check "el driver incluye avm_rate.c" grep -q "avm_rate.c" "$OUT/mac/AVMatrix.driver/Contents/MacOS/AVMatrix"
+check "la app incluye los puentes (avm_bridge.c y avm_bridge_core.c)" bash -c "grep -q avm_bridge.c '$OUT/mac/AV Matrix.app/Contents/MacOS/AVMatrix' && grep -q avm_bridge_core.c '$OUT/mac/AV Matrix.app/Contents/MacOS/AVMatrix'"
+check "se ejecutan las pruebas de EVO y Dante (motor)" grep -q "^EVO y Dante (motor): [0-9]* comprobaciones correctas, 0 fallos" "$LOG"
+check "se ejecutan las pruebas simuladas de los puentes" grep -q "^Puentes (simulados): [0-9]* comprobaciones correctas, 0 fallos" "$LOG"
 check "el driver incluye avm_persist.c (guardado ordenado)" grep -q "avm_persist.c" "$OUT/mac/AVMatrix.driver/Contents/MacOS/AVMatrix"
 check "se ejecutan las pruebas del guardado ordenado" grep -q "^Guardado: [0-9]* comprobaciones correctas, 0 fallos" "$LOG"
 check "se ejecutan las pruebas del veredicto de la autoprueba" grep -q "^Autoprueba (veredicto): [0-9]* comprobaciones correctas, 0 fallos" "$LOG"

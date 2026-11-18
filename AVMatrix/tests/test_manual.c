@@ -124,6 +124,23 @@ static void test_topics(void)
         { "mixer y Smaart: referencia",      "Bajar Smaart Salida 1" },
         { "mixer y Smaart: MUTE",            "Un MUTE en la referencia o en la medición" },
         { "medidores tras el mixer",         "Los medidores muestran el nivel resultante del mixer" },
+        { "puentes: sin DAW",                "No hace falta abrir Logic, Loopback ni otro programa" },
+        { "puentes: recorrido de la música", "Apple Music → AV Matrix Música → matriz y mixer → Dante L/R" },
+        { "Dante: dispositivo",              "elija Dante Virtual Soundcard" },
+        { "Dante: canales 1 y 2",            "Por defecto, 1 y 2" },
+        { "Dante: conectar música",          "«Conectar Música L/R»" },
+        { "EVO: canales reales",             "La lista indica cuántas entradas expone de verdad" },
+        { "EVO: canales separados",          "nunca se mezclan solas" },
+        { "EVO: volumen y MUTE",             "Cada fuente EVO tiene número, nombre editable, medidor, volumen y MUTE" },
+        { "puentes: Activar y Detener",      "«Activar» arranca el puente; «Detener» lo para" },
+        { "puentes: desconexión",            "se reconecta solo, empezando de cero: nunca se reproduce audio viejo" },
+        { "puentes: permiso de micrófono",   "permiso de micrófono para AV Matrix" },
+        { "puentes: relojes",                "CoreAudio compensa la diferencia" },
+        { "puentes: frecuencias",            "Empiece a 48 kHz" },
+        { "puentes: igualar frecuencia",     "«Igualar frecuencia»" },
+        { "puentes: realimentación",         "### Sin realimentación" },
+        { "puentes: referencia intacta",     "la referencia local (Salida 1 → Entrada 8) no cambian" },
+        { "puentes: no probados con reales", "Todavía no se han probado con Dante Virtual Soundcard ni con la EVO reales" },
     };
     for (size_t i = 0; i < sizeof(req) / sizeof(req[0]); i++)
         CHECK(find(req[i].needle) >= 0, "el manual explica: %s («%s»)", req[i].topic, req[i].needle);

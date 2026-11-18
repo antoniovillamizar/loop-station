@@ -26,6 +26,8 @@
 	<string>AVMatrix</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AV Matrix lee el audio de los puentes: las entradas USB de la EVO y la salida Dante L/R hacia Dante Virtual Soundcard. No graba ni envía audio fuera del Mac.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>
