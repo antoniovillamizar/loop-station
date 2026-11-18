@@ -1,8 +1,79 @@
 # AV Matrix — informe para revisión de Codex
 
-Fecha: 19 de octubre de 2026 (revisiones 2 a 14; revisión 1 del 18 de octubre; revisión 14 del 18 de noviembre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
+Fecha: 19 de octubre de 2026 (revisiones 2 a 15; revisión 1 del 18 de octubre; revisiones 14 y 15 del 18 de noviembre). Proyecto nuevo e independiente en `AVMatrix/`. No modifica ningún archivo existente fuera de esa carpeta. Los scripts de instalación respaldan lo que reemplazan en el Mac.
 
-## 0. Revisión 14 — puentes Dante Virtual Soundcard y EVO por USB (sobre `ea2e89f`)
+## 0. Revisión 15 — puentes: buffers validados en el callback y reconstrucción por cambios de configuración (sobre `fd355d7`)
+
+Codex revisó `fd355d7` antes de instalar y encontró dos problemas. Antes de modificar se hizo una copia de seguridad del proyecto en `fd355d7`. **No se instaló nada ni se reinició coreaudiod.**
+
+**Cómo instalar:** `fd355d7` no se ha instalado, así que hace falta **instalación completa** (`install.sh`, no `--app-only`). Respecto a `fd355d7` solo cambia la app (`Client/avm_bridge*`, `App/AVMatrixApp.m`): el driver y `avmctl` de `dist/` son idénticos.
+
+**Dato confirmado por Codex en el Mac:** EVO8, entradas físicas 1-4 y canales 5-6 de loopback, todo a 48 kHz. El valor por defecto (1-4) coincide. Si se elige 5 o 6, el estado avisa de que es loopback (`Client/avm_bridge.c`, `strstr(ext.name, "EVO8")`), y el manual lo explica.
+
+**Qué se comprobó y dónde:**
+- **En Linux:** la función que ejecuta el callback (`avm_bridge_process`) con buffers reales en memoria dinámica, con ASan, UBSan y zonas de guarda; la detección de cambios y la secuencia de reconstrucción, desconexión y reconexión; las mutaciones; la compilación cruzada.
+- **En un Mac:** nada nuevo. La prueba nativa del callback real con `AudioBufferList` (`tests/test_bridge_io.m`, 9 comprobaciones, con ASan en `build.sh`) está escrita y compilada, sin ejecutar.
+- **Con DVS o la EVO reales:** nada.
+
+### 0.15.1 Callback: todos los buffers validados (`Client/avm_bridge_core.c`, `avm_bridge_process`)
+
+- **Causa:** `bridge_io` tomaba los fotogramas del primer buffer de salida y no comprobaba la capacidad de los demás. Con salidas de 256 y 128 fotogramas, la copia escribía fuera de la segunda.
+- **Corrección:** `bridge_io` solo traduce tipos y llama a `avm_bridge_process`. `avm_abl` reproduce la disposición en memoria de `AudioBufferList`, comprobado al compilar con `_Static_assert` sobre `offsetof` y `sizeof`. Así **el mismo código del callback se prueba en Linux**. La función:
+  - si el número de buffers o sus canales no coinciden con el plan, o hay más de 64, entrega **silencio poniendo a cero cada buffer dentro de SU propio `mDataByteSize`** (nunca se supone un tamaño común) y activa `shape_mismatch`;
+  - si coinciden, copia como mucho **el menor número de fotogramas que cabe en TODOS los buffers con datos, de entrada y de salida**, y pone a cero lo que sobra de cada salida;
+  - un buffer con `mData` NULL o tamaño 0 nunca se lee ni se escribe; como entrada, cuenta como silencio;
+  - no reserva memoria ni espera.
+
+### 0.15.2 Cambios de configuración: se reconstruye fuera del hilo de audio (`Client/avm_bridge.c`)
+
+- **Causa:** con `running = true`, `avm_bridge_refresh` conservaba el plan. Si el dispositivo pasaba de 8 a 16 canales, el puente seguía «Conectado» y el callback entregaba silencio.
+- **Corrección:**
+  - El plan guarda con qué canales se hizo (`avm_in/out`, `ext_in/out`). `avm_bridge_needs_rebuild` es portable y se prueba en Linux.
+  - En cada `refresh` con el puente en marcha, `bridge_changed` compara el id del dispositivo externo (por si se reconectó con otro id), sus canales, la forma de los buffers del agregado (`kAudioDevicePropertyStreamConfiguration`) y el aviso `shape_mismatch` del hilo de IO.
+  - Si algo cambió, el puente **se reconstruye en el hilo principal**: primero `AudioDeviceStop`, `AudioDeviceDestroyIOProcID` y la destrucción del agregado; después, agregado y plan nuevos. El estado lo indica: «Puente reconstruido: cambió la configuración del dispositivo».
+  - Avisos nuevos en el dispositivo externo: configuración de streams de entrada y de salida, y `kAudioDevicePropertyStreams`, además de la frecuencia y `IsAlive`.
+  - Si el hilo de IO ve la forma nueva antes de que llegue el aviso, entrega silencio dentro de los límites y marca `shape_mismatch`. La app lo comprueba 15 veces por segundo (`avm_bridge_poll`, con el temporizador de los medidores) y reconstruye.
+- La desconexión y la reconexión siguen igual (parada segura; agregado y plan nuevos al volver, sin audio viejo).
+
+### 0.15.3 Pruebas
+
+| Prueba | Tipo | Qué comprueba |
+| --- | --- | --- |
+| `tests/test_bridge.c` (+30, 82) | Linux, también con ASan y UBSan | **Callback real:** caso de Codex (256 y 128 fotogramas → se copian 128, zona de guarda intacta, L y R correctos y el resto en silencio); entrada de 64 fotogramas; salida de tamaño 0; salida y entrada NULL; listas NULL; canales distintos (8 + 8, con un buffer más pequeño) → silencio dentro de cada buffer y aviso; otro número de buffers; sin lista de entrada; 66 buffers (más de 64). **Reconstrucción:** 8 → 16 canales, canales del externo, mismos canales en otros streams y aviso del hilo de IO obligan a reconstruir; forma nueva con el plan viejo → silencio, nunca «Conectado» con audio equivocado; plan nuevo → EVO 1-4 exactas otra vez. **Desconexión y reconexión** con plan nuevo y fundido desde cero. **EVO8:** 1-4 sin aviso; canal 5 → aviso de loopback |
+| Mutaciones | Linux | Fotogramas del primer buffer de salida (el fallo de `fd355d7`): **ASan da `heap-buffer-overflow`; sin ASan el programa aborta** (`malloc(): corrupted top size`). Silencio con un tamaño común: ASan da `heap-buffer-overflow`. No detectar el cambio de canales: 3 fallos |
+| `tests/test_bridge_io.m` (nueva, nativa, 9) | **Mac (sin ejecutar)**, con ASan en `build.sh` | El callback real `bridge_io` con `AudioBufferList`: 256 y 128 fotogramas, tamaño 0, NULL, listas NULL y forma distinta con aviso |
+| `tests/test_bridge_static.sh` (+6, 24) | Estática | `bridge_io` usa `avm_bridge_process`; `_Static_assert` de la disposición; avisos de streams y canales; comprobación de reconstrucción con el puente en marcha (mutación detectada); parada antes del plan nuevo; `poll` en la app |
+| `tests/test_manual.c` (+2, 381) | Linux | EVO8 (1-4 físicas, 5-6 loopback) y reconstrucción automática |
+
+**Resultados (Linux):**
+
+| Suite | Resultado |
+| --- | --- |
+| Núcleo | 122/122 |
+| Frecuencia | 115/115 |
+| Medidores | 117/117 |
+| Nombres | 60/60 |
+| Manual | 381/381 |
+| Mixer | 99/99 |
+| Faders | 17/17 |
+| EVO y Dante | 36/36 |
+| **Puentes (simulados)** | **82/82** |
+| **Puentes (estático)** | **24/24** |
+| Guardado | 13/13 |
+| Veredicto | 8/8 |
+| avmctl | 8/8 |
+| Instalador | 102/102 |
+| `build.sh` | 35/35 |
+| Textos | 36/36 |
+
+Motor a 0 dB idéntico a `fddbc62`. Sanitizers sin avisos. Compilación cruzada sin avisos.
+
+**Pendiente en el Mac:**
+- `build.sh`, que ejecuta `test_bridge_io` con ASan.
+- La lista de la revisión 14 en `INSTALAR.md`.
+- **Cambiar la configuración de canales de la EVO o de DVS con el puente activo:** el estado debe pasar a «Puente reconstruido» y el audio volver con los canales nuevos.
+
+## 0nonies. Revisión 14 — puentes Dante Virtual Soundcard y EVO por USB (sobre `ea2e89f`)
 
 **Encargo:**
 - Enviar la música a Dante Virtual Soundcard (DVS) desde AV Matrix, sin Logic ni Loopback.

@@ -140,6 +140,8 @@ static void test_topics(void)
         { "puentes: igualar frecuencia",     "«Igualar frecuencia»" },
         { "puentes: realimentación",         "### Sin realimentación" },
         { "puentes: referencia intacta",     "la referencia local (Salida 1 → Entrada 8) no cambian" },
+        { "EVO8: 1-4 físicas, 5-6 loopback", "la 1-4 son las físicas y la 5-6 son loopback" },
+        { "puentes: reconstrucción",         "el puente se reconstruye solo con la nueva configuración" },
         { "puentes: no probados con reales", "Todavía no se han probado con Dante Virtual Soundcard ni con la EVO reales" },
     };
     for (size_t i = 0; i < sizeof(req) / sizeof(req[0]); i++)

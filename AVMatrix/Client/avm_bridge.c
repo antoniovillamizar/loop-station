@@ -5,6 +5,7 @@
 
 #include <Block.h>
 #include <dispatch/dispatch.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,7 @@ struct avm_bridge {
     AudioObjectPropertyListenerBlock listener;
     AudioObjectID     watched_ext;
     AudioObjectID     watched_avm;
+    AudioObjectID     ext_id;         // dispositivo externo con el que se preparó el plan
     bool              in_refresh;
     bool              destroyed;      // tras avm_bridge_destroy: los avisos pendientes no hacen nada
 };
@@ -35,42 +37,32 @@ struct avm_bridge {
 static const AudioObjectPropertyAddress kDevicesAddr = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
 static const AudioObjectPropertyAddress kRateAddr    = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
 static const AudioObjectPropertyAddress kAliveAddr   = { kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+// Cambios de streams o de canales (p. ej. la EVO pasa de 8 a 16 canales).
+static const AudioObjectPropertyAddress kCfgInAddr   = { kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain };
+static const AudioObjectPropertyAddress kCfgOutAddr  = { kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+static const AudioObjectPropertyAddress kStreamsAddr = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
 
 static avm_device_kind avm_kind(const avm_bridge* b) { return b->kind == AVM_BRIDGE_DANTE ? AVM_DEV_DANTE : AVM_DEV_EVO; }
 
 // --- IOProc (hilo de IO del agregado) --------------------------------------------
 
+// avm_abl (avm_bridge_core.h) debe tener exactamente la disposición en memoria
+// de AudioBufferList: así el callback real se prueba también fuera de macOS.
+_Static_assert(sizeof(avm_abl_buffer) == sizeof(AudioBuffer), "AudioBuffer");
+_Static_assert(offsetof(avm_abl_buffer, mNumberChannels) == offsetof(AudioBuffer, mNumberChannels), "mNumberChannels");
+_Static_assert(offsetof(avm_abl_buffer, mDataByteSize) == offsetof(AudioBuffer, mDataByteSize), "mDataByteSize");
+_Static_assert(offsetof(avm_abl_buffer, mData) == offsetof(AudioBuffer, mData), "mData");
+_Static_assert(offsetof(avm_abl, mBuffers) == offsetof(AudioBufferList, mBuffers), "mBuffers");
+
+// El callback solo traduce tipos: avm_bridge_process valida CADA buffer (número,
+// canales y tamaño) y, si algo no cuadra, entrega silencio dentro de los límites
+// de cada uno y avisa al hilo principal para reconstruir el puente.
 static OSStatus bridge_io(AudioObjectID dev, const AudioTimeStamp* now, const AudioBufferList* in, const AudioTimeStamp* inTime,
                           AudioBufferList* out, const AudioTimeStamp* outTime, void* ctx)
 {
     (void)dev; (void)now; (void)inTime; (void)outTime;
     avm_bridge* b = (avm_bridge*)ctx;
-    avm_bridge_plan* p = &b->plan;
-    if (out == NULL) return noErr;
-    // Si la forma de los buffers no es la del plan (cambio de configuración a
-    // mitad), se entrega silencio en vez de copiar canales equivocados.
-    bool shape_ok = (int)out->mNumberBuffers == p->out_nbufs && in != NULL && (int)in->mNumberBuffers == p->in_nbufs;
-    UInt32 frames = 0;
-    for (UInt32 i = 0; shape_ok && i < out->mNumberBuffers; i++) {
-        if (out->mBuffers[i].mNumberChannels != p->out_buf_ch[i]) shape_ok = false;
-        else if (frames == 0 && out->mBuffers[i].mNumberChannels)
-            frames = out->mBuffers[i].mDataByteSize / (UInt32)(sizeof(float) * out->mBuffers[i].mNumberChannels);
-    }
-    for (UInt32 i = 0; shape_ok && i < in->mNumberBuffers; i++)
-        if (in->mBuffers[i].mNumberChannels != p->in_buf_ch[i]
-            || (in->mBuffers[i].mData && in->mBuffers[i].mNumberChannels
-                && in->mBuffers[i].mDataByteSize / (UInt32)(sizeof(float) * in->mBuffers[i].mNumberChannels) < frames))
-            shape_ok = false;
-    if (!shape_ok) {
-        for (UInt32 i = 0; i < out->mNumberBuffers; i++)
-            if (out->mBuffers[i].mData) memset(out->mBuffers[i].mData, 0, out->mBuffers[i].mDataByteSize);
-        return noErr;
-    }
-    const float* ip[AVM_BRIDGE_MAX_BUFS];
-    float* op[AVM_BRIDGE_MAX_BUFS];
-    for (int i = 0; i < p->in_nbufs; i++) ip[i] = (const float*)in->mBuffers[i].mData;
-    for (int i = 0; i < p->out_nbufs; i++) op[i] = (float*)out->mBuffers[i].mData;
-    avm_bridge_render(p, frames, ip, op);
+    avm_bridge_process(&b->plan, (const avm_abl*)in, (avm_abl*)out);
     return noErr;
 }
 
@@ -218,6 +210,7 @@ static bool bridge_start(avm_bridge* b, const avm_hw_device* avm, const avm_hw_d
         return false;
     }
     b->running = true;
+    b->ext_id = ext->id;
     return true;
 }
 
@@ -226,14 +219,11 @@ static bool bridge_start(avm_bridge* b, const avm_hw_device* avm, const avm_hw_d
 static void watch(avm_bridge* b, AudioObjectID ext, AudioObjectID avm)
 {
     if (ext != b->watched_ext) {
-        if (b->watched_ext != kAudioObjectUnknown) {
-            AudioObjectRemovePropertyListenerBlock(b->watched_ext, &kRateAddr, dispatch_get_main_queue(), b->listener);
-            AudioObjectRemovePropertyListenerBlock(b->watched_ext, &kAliveAddr, dispatch_get_main_queue(), b->listener);
-        }
-        if (ext != kAudioObjectUnknown) {
-            AudioObjectAddPropertyListenerBlock(ext, &kRateAddr, dispatch_get_main_queue(), b->listener);
-            AudioObjectAddPropertyListenerBlock(ext, &kAliveAddr, dispatch_get_main_queue(), b->listener);
-        }
+        const AudioObjectPropertyAddress* addrs[5] = { &kRateAddr, &kAliveAddr, &kCfgInAddr, &kCfgOutAddr, &kStreamsAddr };
+        if (b->watched_ext != kAudioObjectUnknown)
+            for (int i = 0; i < 5; i++) AudioObjectRemovePropertyListenerBlock(b->watched_ext, addrs[i], dispatch_get_main_queue(), b->listener);
+        if (ext != kAudioObjectUnknown)
+            for (int i = 0; i < 5; i++) AudioObjectAddPropertyListenerBlock(ext, addrs[i], dispatch_get_main_queue(), b->listener);
         b->watched_ext = ext;
     }
     if (avm != b->watched_avm) {
@@ -278,6 +268,25 @@ void avm_bridge_destroy(avm_bridge* b)
     b->notify = NULL;
 }
 
+// ¿Cambió algo que invalida el plan en marcha? Dispositivo externo distinto
+// (p. ej. reconectado con otro id), sus canales, la forma de los buffers del
+// agregado, o el hilo de IO avisó de buffers con otra forma.
+static bool bridge_changed(avm_bridge* b, const avm_hw_device* ext)
+{
+    if (ext->id != b->ext_id) return true;
+    uint32_t in_ch[AVM_BRIDGE_MAX_BUFS], out_ch[AVM_BRIDGE_MAX_BUFS];
+    int nin = buffer_shape(b->agg, kAudioObjectPropertyScopeInput, in_ch, AVM_BRIDGE_MAX_BUFS);
+    int nout = buffer_shape(b->agg, kAudioObjectPropertyScopeOutput, out_ch, AVM_BRIDGE_MAX_BUFS);
+    if (nin < 0 || nout < 0) return true;
+    return avm_bridge_needs_rebuild(&b->plan, in_ch, nin, out_ch, nout, ext->in_channels, ext->out_channels);
+}
+
+void avm_bridge_poll(avm_bridge* b)
+{
+    if (b && !b->destroyed && b->running && atomic_load_explicit(&b->plan.shape_mismatch, memory_order_relaxed))
+        avm_bridge_refresh(b);
+}
+
 void avm_bridge_refresh(avm_bridge* b)
 {
     if (b == NULL || b->destroyed) return;
@@ -301,6 +310,8 @@ void avm_bridge_refresh(avm_bridge* b)
     env.ext_rate = ext_ok ? ext.rate : 0;
     if (ext_ok) snprintf(env.ext_name, sizeof(env.ext_name), "%s", ext.name);
     env.suspended = b->suspended;
+    // Confirmado en el Mac: la EVO8 expone 6 entradas; 1-4 físicas, 5-6 loopback.
+    if (ext_ok && b->kind == AVM_BRIDGE_EVO && strstr(ext.name, "EVO8")) env.loopback_from = 5;
 
     char msg[512];
     avm_bridge_state want = avm_bridge_evaluate(&b->cfg, &env, msg, sizeof(msg));
@@ -308,14 +319,22 @@ void avm_bridge_refresh(avm_bridge* b)
         if (b->running) bridge_stop(b);              // detener de forma segura
         b->state = want;
         snprintf(b->msg, sizeof(b->msg), "%s", msg);
-    } else if (b->running) {
-        b->state = AVM_BRIDGE_RUN;
-        snprintf(b->msg, sizeof(b->msg), "%s", msg);
-    } else if (bridge_start(b, &avm, &ext)) {
+    } else if (b->running && !bridge_changed(b, &ext)) {
         b->state = AVM_BRIDGE_RUN;
         snprintf(b->msg, sizeof(b->msg), "%s", msg);
     } else {
-        b->state = AVM_BRIDGE_ERROR;                 // b->msg ya explica el motivo
+        // Arranque, o reconstrucción tras un cambio de streams/canales o de
+        // dispositivo: primero se detiene el IOProc y se destruye el agregado
+        // viejo; después, agregado y plan nuevos. Siempre aquí (hilo principal),
+        // nunca en el hilo de audio.
+        bool rebuild = b->running;
+        if (rebuild) bridge_stop(b);
+        if (bridge_start(b, &avm, &ext)) {
+            b->state = AVM_BRIDGE_RUN;
+            snprintf(b->msg, sizeof(b->msg), "%s%s", msg, rebuild ? " (Puente reconstruido: cambió la configuración del dispositivo.)" : "");
+        } else {
+            b->state = AVM_BRIDGE_ERROR;             // b->msg ya explica el motivo
+        }
     }
     watch(b, ext_ok ? ext.id : kAudioObjectUnknown, avm_ok ? avm.id : kAudioObjectUnknown);
     b->in_refresh = false;

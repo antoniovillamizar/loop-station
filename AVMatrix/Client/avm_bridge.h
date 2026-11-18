@@ -37,6 +37,9 @@ void        avm_bridge_set_other_uid(avm_bridge* b, const char* uid);
 void        avm_bridge_set_suspended(avm_bridge* b, bool suspended);
 // Vuelve a mirar el sistema y arranca o detiene según corresponda.
 void        avm_bridge_refresh(avm_bridge* b);
+// Comprobación periódica (hilo principal, p. ej. con el temporizador de los
+// medidores): si el hilo de IO recibió buffers con otra forma, reconstruye.
+void        avm_bridge_poll(avm_bridge* b);
 
 avm_bridge_state avm_bridge_get_state(const avm_bridge* b, char* msg, size_t len);
 bool        avm_bridge_is_running(const avm_bridge* b);

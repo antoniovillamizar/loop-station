@@ -8,6 +8,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int g_pass, g_fail;
@@ -245,6 +246,215 @@ static void test_no_old_audio_on_reconnect(void)
     CHECK(mono, "fundido creciente, sin saltos");
 }
 
+// --- Callback real (avm_bridge_process), revisión 15 -----------------------------
+// Buffers en memoria dinámica del tamaño EXACTO, con una zona de guarda detrás:
+// ASan detecta cualquier escritura fuera y, sin ASan, la guarda cambiaría.
+#define GUARD 64
+typedef struct { avm_abl* list; float* data[8]; uint32_t bytes[8]; uint32_t ch[8]; int n; } abl_t;
+
+static abl_t abl_make(int n, const uint32_t* ch, const uint32_t* frames, int null_mask)
+{
+    abl_t a;
+    memset(&a, 0, sizeof(a));
+    a.n = n;
+    a.list = (avm_abl*)calloc(1, sizeof(avm_abl) + sizeof(avm_abl_buffer) * (size_t)(n > 0 ? n : 1));
+    a.list->mNumberBuffers = (uint32_t)n;
+    for (int i = 0; i < n; i++) {
+        a.ch[i] = ch[i];
+        a.bytes[i] = frames[i] * ch[i] * (uint32_t)sizeof(float);
+        if (!(null_mask & (1 << i))) {
+            uint8_t* raw = (uint8_t*)malloc(a.bytes[i] + GUARD);
+            memset(raw + a.bytes[i], 0xA5, GUARD);
+            a.data[i] = (float*)raw;
+            for (uint32_t k = 0; k < a.bytes[i] / sizeof(float); k++) a.data[i][k] = 7.0f;   // basura
+        }
+        a.list->mBuffers[i].mNumberChannels = ch[i];
+        a.list->mBuffers[i].mDataByteSize = a.bytes[i];
+        a.list->mBuffers[i].mData = a.data[i];
+    }
+    return a;
+}
+
+static int abl_guards_ok(const abl_t* a)
+{
+    for (int i = 0; i < a->n; i++) {
+        if (!a->data[i]) continue;
+        const uint8_t* g = (const uint8_t*)a->data[i] + a->bytes[i];
+        for (int k = 0; k < GUARD; k++) if (g[k] != 0xA5) return 0;
+    }
+    return 1;
+}
+
+static int abl_all_zero(const abl_t* a, int i)
+{
+    if (!a->data[i]) return 1;
+    for (uint32_t k = 0; k < a->bytes[i] / sizeof(float); k++) if (a->data[i][k] != 0.0f) return 0;
+    return 1;
+}
+
+static void abl_free(abl_t* a)
+{
+    for (int i = 0; i < a->n; i++) free(a->data[i]);
+    free(a->list);
+}
+
+// Plan Dante: entradas [AV Matrix Dante 2 ch], salidas [DVS 2 streams de 2 ch]; L -> canal 1, R -> canal 3.
+static avm_bridge_plan dante_plan_2x2(void)
+{
+    avm_bridge_config c = cfg(AVM_BRIDGE_DANTE);
+    c.channel[0] = 1; c.channel[1] = 3;
+    uint32_t in_b[1] = { 2 }, out_b[2] = { 2, 2 };
+    avm_bridge_plan p;
+    char why[128];
+    avm_bridge_make_plan(&c, in_b, 1, out_b, 2, 2, 0, 0, 4, &p, why, sizeof(why));
+    p.fade_pos = AVM_BRIDGE_FADE_FRAMES;   // sin fundido: valores exactos
+    return p;
+}
+
+static void test_process_capacities(void)
+{
+    avm_bridge_plan p = dante_plan_2x2();
+    // Caso de Codex: salida 0 con 256 fotogramas y salida 1 con 128.
+    uint32_t ich[1] = { 2 }, ifr[1] = { 256 }, och[2] = { 2, 2 }, ofr[2] = { 256, 128 };
+    abl_t in = abl_make(1, ich, ifr, 0), out = abl_make(2, och, ofr, 0);
+    for (int f = 0; f < 256; f++) { in.data[0][f * 2] = 0.25f; in.data[0][f * 2 + 1] = -0.5f; }
+    uint32_t n = avm_bridge_process(&p, in.list, out.list);
+    CHECK(n == 128, "capacidades distintas (256 y 128): se copian %u fotogramas, los que caben en todas", n);
+    CHECK(abl_guards_ok(&out) && abl_guards_ok(&in), "ninguna escritura fuera de los buffers (zona de guarda intacta)");
+    int ok = 1;
+    for (int f = 0; f < 128; f++) if (out.data[0][f * 2] != 0.25f || out.data[1][f * 2] != -0.5f || out.data[0][f * 2 + 1] != 0.0f || out.data[1][f * 2 + 1] != 0.0f) ok = 0;
+    for (int f = 128; f < 256; f++) if (out.data[0][f * 2] != 0.0f || out.data[0][f * 2 + 1] != 0.0f) ok = 0;
+    CHECK(ok, "L y R correctos donde caben; el resto de la salida mayor en silencio");
+    abl_free(&in); abl_free(&out);
+
+    // Entrada más pequeña que las salidas: limita la copia.
+    uint32_t ifr2[1] = { 64 }, ofr2[2] = { 256, 256 };
+    in = abl_make(1, ich, ifr2, 0); out = abl_make(2, och, ofr2, 0);
+    n = avm_bridge_process(&p, in.list, out.list);
+    CHECK(n == 64 && abl_guards_ok(&in) && abl_guards_ok(&out), "entrada de 64 fotogramas: se copian 64, sin leer fuera");
+    CHECK(out.data[0][64 * 2] == 0.0f && out.data[1][255 * 2 + 1] == 0.0f, "lo no copiado queda en silencio");
+    abl_free(&in); abl_free(&out);
+
+    // Salida de tamaño 0 (con puntero válido): no se toca; la otra se copia entera.
+    uint32_t ofr3[2] = { 0, 256 };
+    in = abl_make(1, ich, ofr2, 0); out = abl_make(2, och, ofr3, 0);
+    n = avm_bridge_process(&p, in.list, out.list);
+    CHECK(n == 0 && abl_guards_ok(&out), "una salida de tamaño 0 limita la copia a 0 fotogramas, sin escribir en ella");
+    CHECK(abl_all_zero(&out, 1), "la otra salida queda en silencio (no se deja basura)");
+    abl_free(&in); abl_free(&out);
+
+    // Punteros NULL: salida 0 sin memoria y entrada sin datos.
+    in = abl_make(1, ich, ofr2, 1); out = abl_make(2, och, ofr2, 1);
+    n = avm_bridge_process(&p, in.list, out.list);
+    CHECK(abl_guards_ok(&out) && abl_all_zero(&out, 1), "salida NULL ignorada y entrada NULL tratada como silencio (%u)", n);
+    abl_free(&in); abl_free(&out);
+    CHECK(avm_bridge_process(&p, NULL, NULL) == 0, "sin listas: nada");
+    CHECK(!atomic_load(&p.shape_mismatch), "tamaños distintos no son un cambio de forma");
+}
+
+static void test_process_bad_shape(void)
+{
+    avm_bridge_plan p = dante_plan_2x2();
+    uint32_t ich[1] = { 2 }, ifr[1] = { 256 };
+    abl_t in = abl_make(1, ich, ifr, 0);
+
+    // Canales distintos de los del plan (DVS pasa a 8 + 8): silencio en cada
+    // buffer dentro de SU tamaño (el segundo es más pequeño).
+    uint32_t och[2] = { 8, 8 }, ofr[2] = { 256, 32 };
+    abl_t out = abl_make(2, och, ofr, 0);
+    uint32_t n = avm_bridge_process(&p, in.list, out.list);
+    CHECK(n == 0 && abl_all_zero(&out, 0) && abl_all_zero(&out, 1) && abl_guards_ok(&out), "canales distintos: silencio dentro de cada buffer");
+    CHECK(atomic_load(&p.shape_mismatch) == 1, "y avisa al hilo principal para reconstruir");
+    abl_free(&out);
+
+    // Otro número de buffers.
+    atomic_store(&p.shape_mismatch, 0);
+    uint32_t och3[3] = { 2, 2, 2 }, ofr3[3] = { 16, 300, 1 };
+    out = abl_make(3, och3, ofr3, 2);   // el segundo sin memoria
+    avm_bridge_process(&p, in.list, out.list);
+    CHECK(abl_guards_ok(&out) && abl_all_zero(&out, 0) && abl_all_zero(&out, 2) && atomic_load(&p.shape_mismatch), "otro número de buffers: silencio y aviso");
+    abl_free(&out);
+
+    // Sin lista de entrada cuando el plan espera una.
+    atomic_store(&p.shape_mismatch, 0);
+    uint32_t och2[2] = { 2, 2 }, ofr2[2] = { 64, 64 };
+    out = abl_make(2, och2, ofr2, 0);
+    avm_bridge_process(&p, NULL, out.list);
+    CHECK(abl_all_zero(&out, 0) && abl_all_zero(&out, 1) && atomic_load(&p.shape_mismatch), "sin entrada: silencio y aviso");
+    abl_free(&out);
+
+    // Más buffers de los que admite el plan: silencio sin desbordar nada.
+    atomic_store(&p.shape_mismatch, 0);
+    enum { NB = AVM_BRIDGE_MAX_BUFS + 2 };
+    avm_abl* big = (avm_abl*)calloc(1, sizeof(avm_abl) + sizeof(avm_abl_buffer) * NB);
+    big->mNumberBuffers = NB;
+    float tiny[NB][2];
+    for (int i = 0; i < NB; i++) { tiny[i][0] = tiny[i][1] = 3.0f; big->mBuffers[i].mNumberChannels = 1; big->mBuffers[i].mDataByteSize = 2 * sizeof(float); big->mBuffers[i].mData = tiny[i]; }
+    avm_bridge_process(&p, in.list, big);
+    int z = 1; for (int i = 0; i < NB; i++) if (tiny[i][0] != 0.0f || tiny[i][1] != 0.0f) z = 0;
+    CHECK(z && atomic_load(&p.shape_mismatch), "%d buffers (más de %d): silencio en todos y aviso", NB, AVM_BRIDGE_MAX_BUFS);
+    free(big);
+    abl_free(&in);
+}
+
+// Cambio de configuración (la EVO pasa de 8 a 16 canales) y reconstrucción.
+static void test_rebuild_on_config_change(void)
+{
+    avm_bridge_config c = cfg(AVM_BRIDGE_EVO);
+    uint32_t in8[1] = { 8 }, out_b[2] = { 4, 8 };
+    avm_bridge_plan p;
+    char why[128];
+    CHECK(avm_bridge_make_plan(&c, in8, 1, out_b, 2, 0, 4, 8, 8, &p, why, sizeof(why)), "plan con la EVO de 8 canales");
+    CHECK(!avm_bridge_needs_rebuild(&p, in8, 1, out_b, 2, 8, 8), "sin cambios: no se reconstruye");
+    uint32_t in16[1] = { 16 }, out16[2] = { 4, 16 };
+    CHECK(avm_bridge_needs_rebuild(&p, in16, 1, out16, 2, 16, 16), "8 -> 16 canales: hay que reconstruir");
+    CHECK(avm_bridge_needs_rebuild(&p, in8, 1, out_b, 2, 16, 8), "cambian los canales del externo: reconstruir");
+    uint32_t split[2] = { 4, 4 };
+    CHECK(avm_bridge_needs_rebuild(&p, split, 2, out_b, 2, 8, 8), "mismos canales en otros streams: reconstruir");
+
+    // El hilo de IO recibe ya la forma nueva antes que el hilo principal: silencio + aviso.
+    uint32_t ich[1] = { 16 }, ifr[1] = { 128 }, och[2] = { 4, 16 }, ofr[2] = { 128, 128 };
+    abl_t in = abl_make(1, ich, ifr, 0), out = abl_make(2, och, ofr, 0);
+    for (int f = 0; f < 128; f++) for (int k = 0; k < 16; k++) in.data[0][f * 16 + k] = (float)(k + 1) / 32.0f;
+    avm_bridge_process(&p, in.list, out.list);
+    CHECK(abl_all_zero(&out, 0) && atomic_load(&p.shape_mismatch), "forma nueva con el plan viejo: silencio (no «Conectado» con audio)");
+    CHECK(avm_bridge_needs_rebuild(&p, in8, 1, out_b, 2, 8, 8), "el aviso del hilo de IO obliga a reconstruir");
+
+    // Reconstrucción (hilo principal): plan nuevo con 16 canales; vuelve el audio.
+    avm_bridge_plan q;
+    CHECK(avm_bridge_make_plan(&c, in16, 1, out16, 2, 0, 4, 16, 16, &q, why, sizeof(why)) && !atomic_load(&q.shape_mismatch), "plan nuevo de 16 canales");
+    q.fade_pos = AVM_BRIDGE_FADE_FRAMES;
+    uint32_t n = avm_bridge_process(&q, in.list, out.list);
+    int ok = n == 128;
+    for (int f = 0; f < 128; f++) for (int k = 0; k < 4; k++) if (out.data[0][f * 4 + k] != (float)(k + 1) / 32.0f) ok = 0;
+    CHECK(ok && abl_all_zero(&out, 1) && abl_guards_ok(&out), "tras reconstruir: EVO 1-4 exactas otra vez, salidas de la EVO en silencio");
+    CHECK(!avm_bridge_needs_rebuild(&q, in16, 1, out16, 2, 16, 16), "el plan nuevo coincide con el dispositivo");
+    abl_free(&in); abl_free(&out);
+
+    // Desconexión y reconexión con la nueva configuración.
+    char m[256];
+    avm_bridge_env e = env_ok(48000, 16, "EVO16");
+    e.ext_present = false;
+    CHECK(avm_bridge_evaluate(&c, &e, m, sizeof(m)) == AVM_BRIDGE_WAIT_DEVICE, "desconectada: se detiene");
+    e.ext_present = true;
+    CHECK(avm_bridge_evaluate(&c, &e, m, sizeof(m)) == AVM_BRIDGE_RUN, "reconectada: vuelve a funcionar");
+    avm_bridge_plan r;
+    avm_bridge_make_plan(&c, in16, 1, out16, 2, 0, 4, 16, 16, &r, why, sizeof(why));
+    CHECK(r.fade_pos == 0 && !atomic_load(&r.shape_mismatch), "reconexión: plan nuevo, con fundido desde cero y sin avisos viejos");
+}
+
+// La EVO8 (confirmado en el Mac): 1-4 físicas, 5-6 loopback.
+static void test_evo8_loopback(void)
+{
+    char m[256];
+    avm_bridge_config c = cfg(AVM_BRIDGE_EVO);
+    avm_bridge_env e = env_ok(48000, 6, "EVO8");
+    e.loopback_from = 5;
+    CHECK(avm_bridge_evaluate(&c, &e, m, sizeof(m)) == AVM_BRIDGE_RUN && !strstr(m, "loopback"), "EVO8 con 1-4 (por defecto): sin aviso");
+    c.channel[3] = 5;
+    CHECK(avm_bridge_evaluate(&c, &e, m, sizeof(m)) == AVM_BRIDGE_RUN && strstr(m, "loopback") && strstr(m, "5"), "EVO8 con el canal 5: aviso de loopback («%s»)", m);
+}
+
 int main(void)
 {
     test_defaults();
@@ -253,6 +463,10 @@ int main(void)
     test_dante_plan_and_render();
     test_evo_plan_and_render();
     test_no_old_audio_on_reconnect();
+    test_process_capacities();
+    test_process_bad_shape();
+    test_rebuild_on_config_change();
+    test_evo8_loopback();
     printf("Puentes (simulados): %d comprobaciones correctas, %d fallos\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

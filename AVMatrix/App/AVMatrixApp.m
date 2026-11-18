@@ -1902,6 +1902,9 @@ static void BridgeNotify(void* ctx);
 
 - (void)pollMeters
 {
+    // Puentes: si el hilo de IO vio buffers con otra forma, se reconstruyen aquí.
+    if (self.danteRow.bridge) avm_bridge_poll(self.danteRow.bridge);
+    if (self.evoRow.bridge) avm_bridge_poll(self.evoRow.bridge);
     BOOL mainVisible = (self.window.occlusionState & NSWindowOcclusionStateVisible) != 0;
     BOOL mixerVisible = self.mixer.window.visible && (self.mixer.window.occlusionState & NSWindowOcclusionStateVisible);
     if (!mainVisible && !mixerVisible) return;

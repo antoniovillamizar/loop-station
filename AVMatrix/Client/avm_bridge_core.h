@@ -22,6 +22,7 @@
 #ifndef AVM_BRIDGE_CORE_H
 #define AVM_BRIDGE_CORE_H
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -68,6 +69,7 @@ typedef struct {
     double   ext_rate;
     char     ext_name[256];
     bool     suspended;
+    uint32_t loopback_from;          // EVO: primer canal que es loopback (p. ej. 5 en la EVO8); 0 = no se sabe
 } avm_bridge_env;
 
 // Estado que corresponde a la configuración y al entorno, con un mensaje claro
@@ -86,7 +88,45 @@ typedef struct {
     int      ncopy;
     struct { int in_buf, in_ch, out_buf, out_ch; } copy[AVM_BRIDGE_MAX_CH];
     uint32_t fade_pos;                            // muestras de fundido ya hechas
+    // Canales con los que se preparó el plan (para detectar cambios de configuración).
+    uint32_t avm_in, avm_out, ext_in, ext_out;
+    // El hilo de IO lo pone a 1 si recibe buffers con otra forma: el hilo
+    // principal lo ve (avm_bridge_needs_rebuild) y reconstruye el puente.
+    _Atomic uint32_t shape_mismatch;
 } avm_bridge_plan;
+
+// Lista de buffers con la MISMA disposición en memoria que AudioBufferList
+// de CoreAudio (avm_bridge.c lo comprueba al compilar). Permite probar el
+// callback real fuera de macOS.
+typedef struct {
+    uint32_t mNumberChannels;
+    uint32_t mDataByteSize;
+    void*    mData;
+} avm_abl_buffer;
+
+typedef struct {
+    uint32_t       mNumberBuffers;
+    avm_abl_buffer mBuffers[1];      // en realidad mNumberBuffers elementos
+} avm_abl;
+
+// Todo el trabajo del callback de IO del puente (hilo de audio, sin memoria
+// nueva ni esperas):
+//   * Si el número de buffers o sus canales no coinciden con el plan, o hay más
+//     de AVM_BRIDGE_MAX_BUFS, entrega SILENCIO: cada buffer de salida se pone a
+//     cero dentro de SU propio tamaño, y marca plan->shape_mismatch.
+//   * Si coinciden, copia como mucho el menor número de fotogramas que caben en
+//     TODOS los buffers con datos (entradas y salidas); lo que sobra de cada
+//     salida se pone a cero. Un buffer con mData NULL o de tamaño 0 nunca se
+//     escribe ni se lee (una entrada así cuenta como silencio).
+// Devuelve los fotogramas copiados (0 si entregó silencio).
+uint32_t avm_bridge_process(avm_bridge_plan* p, const avm_abl* in, avm_abl* out);
+
+// ¿Hay que reconstruir el puente? true si los canales actuales del agregado
+// (forma de los buffers) o del dispositivo externo no son los del plan, o si
+// el hilo de IO recibió buffers con otra forma. Se llama en el hilo principal.
+bool avm_bridge_needs_rebuild(const avm_bridge_plan* p,
+                              const uint32_t* in_buf_ch, int in_nbufs, const uint32_t* out_buf_ch, int out_nbufs,
+                              uint32_t ext_in, uint32_t ext_out);
 
 // Canal global (desde 0) -> buffer y canal dentro del buffer.
 bool avm_bridge_locate(const uint32_t* buf_ch, int nbufs, uint32_t global, int* buf, int* ch);

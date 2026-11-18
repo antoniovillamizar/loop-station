@@ -18,6 +18,12 @@ check "compensación de deriva en el lado de AV Matrix" bash -c 'grep -q "dict_s
 check "AV Matrix primero en el agregado" bash -c 'grep -n "CFArrayAppendValue(subs, sa);" <<< "$1" | head -1 | grep -q . && [ $(grep -n "CFArrayAppendValue(subs, sa);" <<< "$1" | cut -d: -f1) -lt $(grep -n "CFArrayAppendValue(subs, se);" <<< "$1" | cut -d: -f1) ]' _ "$B"
 check "se rechazan dispositivos de AV Matrix y agregados que los contienen" bash -c 'grep -q "ext.is_avmatrix || contains_avmatrix(ext.id)" <<< "$1"' _ "$B"
 check "el IOProc no reserva memoria" bash -c '! sed -n "/^static OSStatus bridge_io/,/^}/p" <<< "$1" | grep -qE "malloc|calloc|CFRelease|printf|dispatch_"' _ "$B"
+check "el callback valida todos los buffers con avm_bridge_process" bash -c 'sed -n "/^static OSStatus bridge_io/,/^}/p" <<< "$1" | grep -q "avm_bridge_process(&b->plan, (const avm_abl\*)in, (avm_abl\*)out);"' _ "$B"
+check "avm_abl tiene la disposición de AudioBufferList (comprobado al compilar)" bash -c 'grep -q "_Static_assert(offsetof(avm_abl, mBuffers) == offsetof(AudioBufferList, mBuffers)" <<< "$1"' _ "$B"
+check "avisos de cambios de streams y canales del dispositivo externo" bash -c 'grep -q "kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput" <<< "$1" && grep -q "kAudioDevicePropertyStreams" <<< "$1"' _ "$B"
+check "con el puente en marcha se comprueba si hay que reconstruirlo" bash -c 'grep -q "} else if (b->running \&\& !bridge_changed(b, \&ext)) {" <<< "$1"' _ "$B"
+check "la reconstrucción detiene el IOProc antes del plan nuevo" bash -c 'grep -q "if (rebuild) bridge_stop(b);" <<< "$1"' _ "$B"
+check "la app comprueba los avisos del hilo de IO (poll)" bash -c 'grep -q "avm_bridge_poll(self.danteRow.bridge)" <<< "$1"' _ "$A"
 check "cada arranque crea un agregado nuevo (sin audio viejo)" bash -c 'grep -q "AudioHardwareDestroyAggregateDevice(b->agg);" <<< "$1" && grep -q "if (b->running && (!same_route || !c->enabled)) bridge_stop(b);" <<< "$1"' _ "$B"
 check "avisos de dispositivos, frecuencia y desconexión" bash -c 'grep -q "kAudioHardwarePropertyDevices" <<< "$1" && grep -q "kAudioDevicePropertyDeviceIsAlive" <<< "$1" && grep -q "kAudioDevicePropertyNominalSampleRate" <<< "$1"' _ "$B"
 

@@ -105,9 +105,15 @@ avm_bridge_state avm_bridge_evaluate(const avm_bridge_config* c, const avm_bridg
                  dante ? "enviar" : "recibir");
         return AVM_BRIDGE_RATE_MISMATCH;
     }
+    int loop = 0;
+    if (!dante && env->loopback_from > 0)
+        for (int k = 0; k < n; k++) if (c->channel[k] >= (int)env->loopback_from) loop = c->channel[k];
     if (missing)
         snprintf(msg, len, "Conectado a %s a %.1f kHz. Aviso: solo expone %u entradas; %d canal(es) en silencio.",
                  env->ext_name, env->ext_rate / 1000.0, (unsigned)env->ext_channels, missing);
+    else if (loop)
+        snprintf(msg, len, "Conectado a %s a %.1f kHz. Aviso: el canal %d es loopback (lo que el Mac reproduce en la EVO), no una entrada física.",
+                 env->ext_name, env->ext_rate / 1000.0, loop);
     else if (dante)
         snprintf(msg, len, "Conectado a %s, canales %d y %d, a %.1f kHz.", env->ext_name, c->channel[0], c->channel[1], env->ext_rate / 1000.0);
     else
@@ -156,6 +162,8 @@ bool avm_bridge_make_plan(const avm_bridge_config* c,
     }
     p->in_nbufs = in_nbufs;
     p->out_nbufs = out_nbufs;
+    p->avm_in = avm_in; p->avm_out = avm_out; p->ext_in = ext_in; p->ext_out = ext_out;
+    atomic_init(&p->shape_mismatch, 0);
     memcpy(p->in_buf_ch, in_buf_ch, sizeof(uint32_t) * (size_t)in_nbufs);
     memcpy(p->out_buf_ch, out_buf_ch, sizeof(uint32_t) * (size_t)out_nbufs);
     for (int k = 0; k < n; k++) {
@@ -205,4 +213,76 @@ void avm_bridge_render(avm_bridge_plan* p, uint32_t frames, const float* const* 
     }
     uint32_t np = fade0 + frames;
     p->fade_pos = np > AVM_BRIDGE_FADE_FRAMES ? AVM_BRIDGE_FADE_FRAMES : np;
+}
+
+static void silence_all(avm_abl* out)
+{
+    // Cada buffer dentro de SU tamaño: nunca se supone un tamaño común.
+    for (uint32_t i = 0; i < out->mNumberBuffers; i++)
+        if (out->mBuffers[i].mData && out->mBuffers[i].mDataByteSize)
+            memset(out->mBuffers[i].mData, 0, out->mBuffers[i].mDataByteSize);
+}
+
+uint32_t avm_bridge_process(avm_bridge_plan* p, const avm_abl* in, avm_abl* out)
+{
+    if (out == NULL) return 0;
+    const uint32_t nin = in ? in->mNumberBuffers : 0;
+    bool shape_ok = (int)out->mNumberBuffers == p->out_nbufs && (int)nin == p->in_nbufs
+                 && out->mNumberBuffers <= AVM_BRIDGE_MAX_BUFS && nin <= AVM_BRIDGE_MAX_BUFS;
+    for (uint32_t i = 0; shape_ok && i < out->mNumberBuffers; i++)
+        if (out->mBuffers[i].mNumberChannels != p->out_buf_ch[i]) shape_ok = false;
+    for (uint32_t i = 0; shape_ok && i < nin; i++)
+        if (in->mBuffers[i].mNumberChannels != p->in_buf_ch[i]) shape_ok = false;
+    if (!shape_ok) {
+        atomic_store_explicit(&p->shape_mismatch, 1, memory_order_relaxed);
+        silence_all(out);
+        return 0;
+    }
+
+    // Fotogramas: el mínimo que cabe en TODOS los buffers con datos.
+    uint64_t frames = UINT32_MAX;
+    bool any = false;
+    for (uint32_t i = 0; i < out->mNumberBuffers; i++) {
+        const avm_abl_buffer* b = &out->mBuffers[i];
+        if (b->mData == NULL || b->mNumberChannels == 0) continue;
+        uint64_t f = b->mDataByteSize / (sizeof(float) * (uint64_t)b->mNumberChannels);
+        if (f < frames) frames = f;
+        any = true;
+    }
+    for (uint32_t i = 0; i < nin; i++) {
+        const avm_abl_buffer* b = &in->mBuffers[i];
+        if (b->mData == NULL || b->mNumberChannels == 0) continue;
+        uint64_t f = b->mDataByteSize / (sizeof(float) * (uint64_t)b->mNumberChannels);
+        if (f < frames) frames = f;
+    }
+    if (!any) frames = 0;
+
+    const float* ip[AVM_BRIDGE_MAX_BUFS];
+    float* op[AVM_BRIDGE_MAX_BUFS];
+    for (uint32_t i = 0; i < nin; i++)
+        ip[i] = (in->mBuffers[i].mDataByteSize && in->mBuffers[i].mNumberChannels) ? (const float*)in->mBuffers[i].mData : NULL;
+    for (uint32_t i = 0; i < out->mNumberBuffers; i++)
+        op[i] = (out->mBuffers[i].mDataByteSize && out->mBuffers[i].mNumberChannels) ? (float*)out->mBuffers[i].mData : NULL;
+    if (frames > 0) avm_bridge_render(p, (uint32_t)frames, ip, op);
+
+    // Lo que no se ha escrito de cada salida, a cero (dentro de su tamaño).
+    for (uint32_t i = 0; i < out->mNumberBuffers; i++) {
+        avm_abl_buffer* b = &out->mBuffers[i];
+        if (b->mData == NULL) continue;
+        size_t used = (size_t)frames * b->mNumberChannels * sizeof(float);
+        if (used < b->mDataByteSize) memset((uint8_t*)b->mData + used, 0, b->mDataByteSize - used);
+    }
+    return (uint32_t)frames;
+}
+
+bool avm_bridge_needs_rebuild(const avm_bridge_plan* p,
+                              const uint32_t* in_buf_ch, int in_nbufs, const uint32_t* out_buf_ch, int out_nbufs,
+                              uint32_t ext_in, uint32_t ext_out)
+{
+    if (atomic_load_explicit(&p->shape_mismatch, memory_order_relaxed)) return true;
+    if (ext_in != p->ext_in || ext_out != p->ext_out) return true;
+    if (in_nbufs != p->in_nbufs || out_nbufs != p->out_nbufs) return true;
+    for (int i = 0; i < in_nbufs; i++) if (in_buf_ch[i] != p->in_buf_ch[i]) return true;
+    for (int i = 0; i < out_nbufs; i++) if (out_buf_ch[i] != p->out_buf_ch[i]) return true;
+    return false;
 }
